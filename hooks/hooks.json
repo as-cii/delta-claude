@@ -1,0 +1,4 @@
+{
+  "description": "Register /delta and capture settled Claude Code conversation rows.",
+  "modules": ["./register.tsx"]
+}

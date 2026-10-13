@@ -1,0 +1,1 @@
+{"operation":"status","thread_id":"thread_example","url":null,"access":{"state":"local_only","is_owner":null},"worktrees":{"status":"available","items":[]},"producer":{"source":"claude-code","external_id":"session","next_sequence":1,"turn":null}}

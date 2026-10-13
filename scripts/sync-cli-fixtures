@@ -1,0 +1,62 @@
+#!/usr/bin/env python3
+"""Refresh plugin examples from a Delta checkout, reporting every changed file."""
+
+import argparse
+import difflib
+import json
+from pathlib import Path
+
+
+def fixture_module(directory):
+    fixtures = {path.stem: json.loads(path.read_text()) if path.suffix == ".json"
+                else [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+                for path in sorted(directory.iterdir()) if path.suffix in {".json", ".jsonl"}}
+    lines = ["// Generated from hooks/fixtures/cli by scripts/sync-cli-fixtures.",
+             "export const cliFixtureData: Record<string, any> = {"]
+    lines.extend("  " + json.dumps(name) + ": " + json.dumps(value, separators=(",", ":"), ensure_ascii=False) + ","
+                 for name, value in fixtures.items())
+    return "\n".join([*lines, "}", ""])
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("delta_checkout", type=Path)
+    args = parser.parse_args()
+    source = args.delta_checkout / "crates/delta_ipc/fixtures/cli"
+    destination = Path(__file__).resolve().parent.parent / "hooks/fixtures/cli"
+    files = sorted(path for path in source.iterdir() if path.suffix in {".json", ".jsonl"} or path.name == "README.md") if source.is_dir() else []
+    if not files:
+        parser.error(f"No CLI JSON fixtures in {source}")
+    # Validate the whole input before changing any plugin examples.
+    incoming = {path.name: path.read_text() for path in files}
+    for name, text in incoming.items():
+        if name.endswith(".json"):
+            json.loads(text)
+        elif name.endswith(".jsonl"):
+            for line in text.splitlines():
+                if line.strip():
+                    json.loads(line)
+    destination.mkdir(parents=True, exist_ok=True)
+    changed = 0
+    for name, text in incoming.items():
+        target = destination / name
+        previous = target.read_text() if target.exists() else ""
+        if previous == text:
+            print(f"unchanged {name}")
+            continue
+        print("".join(difflib.unified_diff(
+            previous.splitlines(keepends=True), text.splitlines(keepends=True),
+            fromfile=f"plugin/{name}", tofile=f"delta/{name}",
+        )), end="")
+        target.write_text(text)
+        changed += 1
+    extra = sorted(path.name for path in destination.iterdir() if path.name not in incoming)
+    if extra:
+        print("Plugin-only files (not removed): " + ", ".join(extra))
+    module = destination.parent.parent / "cli-fixture-data.ts"
+    module.write_text(fixture_module(destination))
+    print(f"Refreshed {changed} of {len(incoming)} fixtures from {source}")
+
+
+if __name__ == "__main__":
+    main()

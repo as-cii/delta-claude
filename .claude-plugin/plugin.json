@@ -1,0 +1,10 @@
+{
+  "name": "delta",
+  "version": "0.1.1",
+  "description": "Share Claude Code conversations and worktrees with collaborators through Delta.",
+  "author": {
+    "name": "Zed Industries"
+  },
+  "repository": "https://github.com/zed-industries/delta-claude",
+  "license": "AGPL-3.0-only"
+}

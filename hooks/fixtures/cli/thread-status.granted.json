@@ -1,0 +1,1 @@
+{"operation":"status","thread_id":"thread_example","url":"https://delta.dev/join/share_example","access":{"state":"granted","is_owner":true},"worktrees":{"status":"available","items":[]},"producer":{"source":"claude-code","external_id":"session","next_sequence":1,"turn":null}}

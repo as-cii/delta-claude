@@ -1,0 +1,16 @@
+{
+  "name": "zed-industries",
+  "owner": {
+    "name": "Zed Industries"
+  },
+  "metadata": {
+    "description": "Claude Code integrations from Zed Industries."
+  },
+  "plugins": [
+    {
+      "name": "delta",
+      "source": "./",
+      "description": "Share Claude Code conversations and worktrees with collaborators through Delta."
+    }
+  ]
+}

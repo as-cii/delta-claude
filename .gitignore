@@ -1,0 +1,22 @@
+.claude-plugin/types/
+tsconfig.json
+
+# Local credentials and machine-specific Claude settings.
+.env
+.env.*
+!.env.example
+!.env.*.example
+.claude/settings.local.json
+*.pem
+*.key
+*.p12
+*.pfx
+id_rsa
+id_ed25519
+
+# Local dependencies, caches, and diagnostic output.
+node_modules/
+__pycache__/
+*.py[cod]
+*.log
+.DS_Store
