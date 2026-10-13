@@ -5,7 +5,7 @@ import { acknowledgedOutboxFiles, acknowledgedPrefix, appendBatch, appendOutboxR
 import { readCommandStream } from './command-reader'
 import { deliveryFailure, deliveryRetryDelay } from './delivery-policy'
 import { snapshotMessages } from './snapshot'
-import { activeBackgroundAgents, interactiveJoin, joinPreflight, missingJoinCommands, ownsSteering, promptGate, releasesMounts, worktreeChanges } from './lifecycle'
+import { activeBackgroundAgents, hasInteractiveSurface, joinPreflight, missingJoinCommands, ownsSteering, promptGate, releasesMounts, worktreeChanges } from './lifecycle'
 import { checkResult, reconnectDelay, validateAttachmentReceipt, validateCreationReceipt, validatePublicationReceipt } from './command-outcomes'
 import { copyText, personColor, personKey, renderBand, statusCurrentTurn, statusSpinnerRunning, SPINNER_FRAMES, threadTurnOwned, toolRowParts, type StatusSegment, type StatusState, type TurnStatus } from './status'
 import { announceThought, DrawnRows, DrawQueue, shownCommandRewrite, shownItemId, SHOW_ANSWER } from './row-delivery'
@@ -2576,7 +2576,7 @@ export function register(on: On) {
     try {
       if (session !== active || !stateFor(session).binding) await activate($, session)
       if (locator) {
-        if (!interactiveJoin(await $.session.surfaces()))
+        if (!hasInteractiveSurface(await $.session.surfaces()))
           return { text: '/delta join requires an interactive Claude Code terminal or Desktop Code tab. Print mode and SDK sessions have no interactive surface for the session transition.' }
         if (stateFor(session).currentTurnId || stateFor(session).promptEntering)
           return { text: 'Wait for the current Claude turn to finish before joining.' }
@@ -2591,8 +2591,16 @@ export function register(on: On) {
         return { text: 'Wait for the current Claude turn to finish before sharing.' }
       sharing = session
       setProgress($, 'Preparing to share…', 'active', [1, 5])
-      $.clock.after(0, () => runShare($, session))
-      return {}
+      if (hasInteractiveSurface(await $.session.surfaces())) {
+        $.clock.after(0, () => runShare($, session))
+        return {}
+      }
+      // Cloud and other headless hosts cannot show the band or be relied on to forward
+      // background UI notices. Keep the command open so its caller receives the outcome.
+      const url = await share($, session)
+      finishProgress($, 'Shared', 'done')
+      if (sharing === session) sharing = undefined
+      return { text: `Delta share link: ${url}` }
     }
     catch (error) {
       const text = `Delta sharing failed: ${String(error)}. Fix the issue and retry ${locator ? `/delta join ${locator}` : recoveryCommand(stateFor(session).binding)}; saved records retain their sequence.`

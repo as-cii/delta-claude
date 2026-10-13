@@ -1,5 +1,5 @@
 import { expect, test } from 'claude-code/testing'
-import { activeBackgroundAgents, interactiveJoin, joinPreflight, missingJoinCommands, promptGate, releasesMounts, worktreeChanges } from './lifecycle'
+import { activeBackgroundAgents, hasInteractiveSurface, joinPreflight, missingJoinCommands, promptGate, releasesMounts, worktreeChanges } from './lifecycle'
 import { cliFixture } from './cli-fixtures'
 import type { MountedThread, ThreadMount, ThreadState } from './thread-commands'
 
@@ -8,11 +8,11 @@ test('only exit reasons release session mounts', () => {
   for (const reason of ['clear', 'resume']) expect(releasesMounts(reason)).toBe(false)
 })
 
-test('join accepts terminal and desktop, not noninteractive surfaces', () => {
-  expect(interactiveJoin(['terminal'])).toBe(true)
-  expect(interactiveJoin(['desktop'])).toBe(true)
-  expect(interactiveJoin([])).toBe(false)
-  expect(interactiveJoin(['sdk', 'print'])).toBe(false)
+test('terminal and desktop are interactive, while headless hosts are not', () => {
+  expect(hasInteractiveSurface(['terminal'])).toBe(true)
+  expect(hasInteractiveSurface(['desktop'])).toBe(true)
+  expect(hasInteractiveSurface([])).toBe(false)
+  expect(hasInteractiveSurface(['sdk', 'print'])).toBe(false)
 })
 
 test('join checks every required built-in, not commands with matching plugin names', () => {

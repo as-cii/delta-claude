@@ -46,6 +46,12 @@ root, publishes to your organization, starts the read-only watcher, and drains
 the immutable outbox. Success returns the organization-shared URL only after
 the watcher's initial snapshot and server-confirmed delivery.
 
+On terminal and Desktop hosts, the command returns immediately and the status band
+reports progress and the result. Without an interactive surface, as on a cloud
+runner, `/delta share` waits and returns the share link or failure directly as
+command output; it does not rely on the band or a background transcript notice.
+This reporting fallback does not establish full cloud or print/SDK compatibility.
+
 Repeating `/delta share` finishes an interrupted operation using the same session
 binding and staged records. It never resets sequence numbers or reimports a
 changed export. Creation is idempotent even if its response or the local binding
@@ -337,9 +343,9 @@ forking into a fresh Claude session permits a new bounded export.
 
 ## Incoming activity and execution
 
-Sharing, joining or resuming shows its status in the band above the prompt.
+On interactive hosts, sharing, joining or resuming shows its status in the band above the prompt.
 Repeating `/delta share` or `/delta join <link>` re-reports it and recovers the same
-operation. The band is the only status surface: nothing about presence or turns is
+operation. The band is the only ongoing status surface: nothing about presence or turns is
 written to the transcript. It is one row:
 
 ```text

@@ -95,6 +95,30 @@ describe('thread commands', () => {
     fake.expectClean()
   })
 
+  test('share without an interactive surface returns failures and confirmed success through the command', async ($, on) => {
+    const fake = fakeThreads(on, { messages: [text('initial')] })
+    fake.surfaces = []
+    await $.session.start(sessionStart)
+    fake.commandFault = { operation: 'share', code: 'authentication_required', message: 'Sign in to Delta' }
+    expect(await $.command.run(shareCommand)).toEqual({
+      text: 'Delta sharing failed: DeltaCommandError: thread share: authentication_required: Sign in to Delta. Fix the issue and retry /delta share; saved records retain their sequence.',
+    })
+
+    fake.commandFault = undefined
+    let release!: () => void
+    fake.holdAppend = new Promise<void>((resolve) => { release = resolve })
+    let completed = false
+    const result = $.command.run(shareCommand).then((result) => { completed = true; return result })
+    await fake.clock.settle()
+    expect(completed).toBe(false)
+    release()
+    expect(await result).toEqual({ text: `Delta share link: https://delta.dev/join/${fake.shareId}` })
+    // Completion releases the command's prompt gate without relying on a redraw or a timer.
+    expect((await $.prompt.submit(prompt('after sharing'))).drop).toBeUndefined()
+    fake.expectClean()
+    await $.session.end(sessionEnd(fake.session))
+  })
+
   for (const failure of ['record write']) test(`a staging ${failure} failure contacts no Delta command and leaves no partial import`, async ($, on) => {
     const fake = fakeThreads(on, { messages: [text('initial')] })
     await $.session.start(sessionStart)

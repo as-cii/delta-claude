@@ -5,8 +5,8 @@ export function releasesMounts(reason: string): boolean {
   return ['prompt_input_exit', 'logout', 'other'].includes(reason)
 }
 
-/** Join requires a host that can interactively transition sessions. */
-export function interactiveJoin(surfaces: readonly string[]): boolean {
+/** Terminal and Desktop hosts provide interactive controls and the status band. */
+export function hasInteractiveSurface(surfaces: readonly string[]): boolean {
   return surfaces.some((surface) => surface === 'terminal' || surface === 'desktop')
 }
 
