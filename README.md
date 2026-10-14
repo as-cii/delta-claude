@@ -4,16 +4,34 @@ Share a Claude Code conversation and its Git checkout with your Delta organizati
 
 ## Requirements and installation
 
-Claude Code **2.1.287 or newer** with function hooks enabled and the matching
-prototype `delta` CLI on `PATH` are required. Sign in with `delta auth login`.
+Claude Code **2.1.287 or newer** with function hooks enabled is required.
+On the first `/delta share` or `/delta join <link>`, the plugin uses `delta`
+from `PATH`, then checks for an existing stable app on macOS/Linux. On macOS,
+this includes `Delta.app` in `/Applications` and `~/Applications`; the bundled
+CLI works directly, without the app's **Install CLI** menu action.
+
+If Delta is missing on macOS/Linux, the plugin installs the **full stable app
+and windowless client** for the current user using https://delta.dev/install.sh.
+Setup requires `curl`, network access, and writable user directories. Progress
+and errors appear in Claude; retry share/join after resolving an installation error.
+
+On Windows, install Delta from https://delta.dev and put `delta.exe` on `PATH`
+before running Claude Code.
+
+Sign in with `delta auth login` when requested; if Delta is not on your shell's
+PATH, use the installed app or its absolute CLI path.
 Delta's common, windowless client owns the account store, synchronization, and
 checkout mounts. No GUI window is required; the plugin's watcher is only an
 observer, not an authentication service or mount owner.
 
-The plugin never installs or upgrades Delta. Use a CLI build with the thread
-commands below until they are released. The checkout must have its real upstream
-Git remote; for disposable tests, use a worktree of a remote-backed repository
-rather than a repository created only with `git init`.
+If the plugin reports an incompatible CLI, update Delta and retry. Restart
+Claude Code after changing which executable is on `PATH`.
+If setup reports another installation in progress, wait for it to finish and retry.
+After an interrupted installation, remove `~/.cache/delta-claude-install.lock`
+only after confirming no installation is running.
+
+The checkout must have its real upstream Git remote; for disposable tests, use
+a worktree of a remote-backed repository rather than one created only with `git init`.
 
 Install from inside Claude Code:
 
@@ -28,6 +46,7 @@ For local development:
 claude plugin validate .
 claude plugin validate .claude-plugin/plugin.json
 claude plugin test .
+python3 scripts/check-cli-setup.py
 claude --plugin-dir .
 ```
 

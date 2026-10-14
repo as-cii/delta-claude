@@ -27,6 +27,7 @@ describe('joining', () => {
 
   for (const surface of ['terminal'] as const) test(`${surface} joins in a fresh session and separate exact mount without exporting, attaching, publishing, or executing`, async ($, on) => {
     const fake = sharedThread(on, $)
+    fake.cliMissing = true
     fake.surfaces = [surface]
     const previousSession = fake.session
     const old = { session: previousSession, snapshot: false, next: 1, pending: [] }
@@ -42,6 +43,7 @@ describe('joining', () => {
     expect(response.text).toBeUndefined()
     expect(fake.sessionCommands).toEqual([])
     await finishJoin(fake)
+    expect(fake.cliSetups).toEqual(['discover', 'install'])
     const binding = fake.store.get(`session:${fake.session}`) as any
     expect(fake.session).not.toBe(previousSession)
     expect(await bandText($)).toContain(LIVE)
@@ -57,7 +59,7 @@ describe('joining', () => {
     })
     expect(fake.cwd).toBe(directory)
     expect(fake.delta().filter((argv) => argv[3] === 'mount')).toEqual([
-      ['delta', '--json', 'thread', 'mount', link(fake), '--owner', fake.session]])
+      ['/selected/delta', '--json', 'thread', 'mount', link(fake), '--owner', fake.session]])
     // Delta places the checkouts: the plugin chooses no directory and keeps nothing under its config.
     expect([...fake.files.keys()].filter((path) => path.includes('checkouts'))).toEqual([])
     expect(fake.commands.some((argv) => argv[0] === 'pwd')).toBe(false)

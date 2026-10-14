@@ -55,6 +55,65 @@ function expectStagedRecords(fake: ReturnType<typeof fakeThreads>, sequences: nu
 }
 
 describe('thread commands', () => {
+  test('resume with a missing CLI preserves the binding and asks for explicit setup', async ($, on) => {
+    const fake = fakeThreads(on)
+    fake.cliMissing = true
+    const binding = { session: fake.session, thread: fake.threadId, checkout: CHECKOUT,
+      snapshot: true, next: 1, pending: [] }
+    fake.store.set(`session:${fake.session}`, binding)
+    await $.session.start(sessionStart)
+    await fake.clock.settle()
+    expect(fake.cliSetups).toEqual(['discover'])
+    expect(fake.store.get(`session:${fake.session}`)).toEqual(binding)
+    expect(fake.operations()).toEqual([])
+    expect(fake.logs.join('\n')).toContain('Run /delta share or /delta join')
+  })
+
+  test('first explicit share installs a missing CLI, never plugin load or contract failure', async ($, on) => {
+    const fake = fakeThreads(on)
+    fake.cliMissing = true
+    fake.contractRange = { min: 0, max: 0 }
+    await $.session.start(sessionStart)
+    expect(fake.cliSetups).toEqual([])
+    await fake.share($)
+    expect(fake.cliSetups).toEqual(['discover', 'install'])
+    expect(fake.operations()).toEqual([])
+    fake.contractRange = undefined
+    expect(await fake.share($)).toBe(`https://delta.dev/join/${fake.shareId}`)
+    expect(fake.cliSetups).toEqual(['discover', 'install'])
+  })
+
+  for (const change of ['session', 'folder'] as const) test(`share stops when its ${change} changes during installation`, async ($, on) => {
+    const fake = fakeThreads(on, { messages: [text('original conversation')] })
+    fake.cliMissing = true
+    let entered!: () => void
+    const waiting = new Promise<void>((resolve) => { entered = resolve })
+    let release!: () => void
+    const held = new Promise<void>((resolve) => { release = resolve })
+    fake.holdCliSetup = (install) => {
+      if (!install) return
+      entered()
+      return held
+    }
+    await $.session.start(sessionStart)
+    await $.command.run(shareCommand)
+    const running = fake.clock.advance(0)
+    await waiting
+    if (change === 'session') {
+      await $.session.end(sessionEnd(fake.session))
+      fake.session = 'replacement'
+      fake.messages = [text('replacement conversation')]
+      await $.session.start(sessionStart)
+    } else fake.cwd = '/different-checkout'
+    release()
+    await running
+    await fake.clock.settle()
+    expect(fake.exports).toBe(0)
+    expectNoSetupCommands(fake, 0)
+    expect((await $.prompt.submit(prompt('continue here'))).drop).toBeUndefined()
+    fake.expectClean()
+  })
+
   test('first share binds and publishes the checkout, and repeating it does not reimport', async ($, on) => {
     const fake = fakeThreads(on, {
       messages: [text('<local-command-stdout>framing</local-command-stdout>'), text('first'), text('second'), text('third')],
@@ -857,6 +916,37 @@ describe('thread commands', () => {
     await fake.clock.advance(60_000)
     expect(fake.watches.slice(before).filter((watch) => !watch.closed)).toEqual([])
     expect(fake.watches.length - before).toBe(0)
+    fake.expectClean()
+  })
+
+  for (const target of ['watch', 'status'] as const) test(`ending during ${target} CLI resolution never spawns the obsolete command`, async ($, on) => {
+    const fake = fakeThreads(on)
+    await $.session.start(sessionStart)
+    await fake.share($)
+    await $.session.end(sessionEnd(fake.session))
+    const contracts = fake.contractChecks
+    const watches = fake.watches.length
+    let entered!: () => void
+    const waiting = new Promise<void>((resolve) => { entered = resolve })
+    let release!: () => void
+    const held = new Promise<void>((resolve) => { release = resolve })
+    fake.holdCliResolution = () => {
+      if (fake.contractChecks === contracts) return
+      if (target === 'status' && fake.watches.length === watches) return
+      entered()
+      return held
+    }
+    const starting = $.session.start(sessionStart)
+    await waiting
+    const before = fake.commands.length
+    await $.session.end(sessionEnd(fake.session))
+    fake.holdCliResolution = undefined
+    release()
+    await starting
+    await fake.clock.settle()
+    expect(fake.commands.slice(before)).toEqual([])
+    expect(fake.watches.length).toBe(watches + (target === 'status' ? 1 : 0))
+    expect(fake.watches.filter((watch) => !watch.closed)).toEqual([])
     fake.expectClean()
   })
 

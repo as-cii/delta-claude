@@ -279,6 +279,10 @@ export function fakeThreads(on: On, options: {
     contractUnknownSubcommand: false,
     /** Every `thread contract` the plugin asked for, counted apart from the recording commands. */
     contractChecks: 0,
+    cliMissing: false,
+    cliSetups: [] as string[],
+    holdCliSetup: undefined as ((install: boolean) => Promise<void> | undefined) | undefined,
+    holdCliResolution: undefined as (() => Promise<void> | undefined) | undefined,
     /** Reading a transcript from an offset cannot start, as without `tail` or a usable PowerShell. */
     failTranscriptRead: false,
     failWrite: false,
@@ -340,7 +344,7 @@ export function fakeThreads(on: On, options: {
       return fake.records().flatMap((record) => record.turnSequence !== undefined &&
         record.update?.sessionUpdate === 'state_update' && record.update.state === 'idle' ? [record.turnSequence] : [])
     },
-    delta(): string[][] { return fake.commands.filter((argv) => argv[0] === 'delta') },
+    delta(): string[][] { return fake.commands.filter((argv) => argv[0] === '/selected/delta') },
     operations(): (string | undefined)[] { return fake.delta().map((argv) => cliArguments(argv)?.positionals[1]) },
     live(): Watch | undefined { return fake.watches.findLast((watch) => !watch.closed) },
     /** Another client records or changes an item; a live watch sees the whole item. */
@@ -427,7 +431,13 @@ export function fakeThreads(on: On, options: {
     },
   }
 
-  mock.env(on, { CLAUDE_CONFIG_DIR: CONFIG, HOME: '/sandbox', ...options.env })
+  mock.env(((event, handler) => {
+    if (event === 'env.get') on(event, async ($, e, next) => {
+      await fake.holdCliResolution?.()
+      return handler($, e, next)
+    })
+    else on(event, handler)
+  }) as On, { CLAUDE_CONFIG_DIR: CONFIG, HOME: '/sandbox', ...options.env })
   // The kit's bottom stores each row; this records it as the plugin's own hook passed it down.
   on('session.append', ($, e, next) => {
     fake.stored.push({
@@ -561,6 +571,14 @@ export function fakeThreads(on: On, options: {
       const limit = 4 * 1024 * 1024
       return { value: { exitCode, stdout: new TextDecoder().decode(bytes.subarray(0, limit)), stderr,
         isStdoutTruncated: bytes.length > limit, isStderrTruncated: false } }
+    }
+    if (argv[0] === 'sh') {
+      const discovery = !argv[2]?.includes('--non-interactive')
+      fake.cliSetups.push(discovery ? 'discover' : 'install')
+      await fake.holdCliSetup?.(!discovery)
+      if (discovery) return fake.cliMissing ? output('', 3) : output('/selected/delta\n')
+      fake.cliMissing = false
+      return output('/selected/delta\n')
     }
     const parsed = cliArguments(argv)
     const operation = parsed?.positionals[1]
@@ -857,7 +875,7 @@ export function fakeThreads(on: On, options: {
 
 /** Only the fixture's CLI vocabulary; option placement is not part of its contract. */
 function cliArguments(argv: readonly string[]) {
-  if (argv[0] !== 'delta') return undefined
+  if (argv[0] !== '/selected/delta') return undefined
   const positionals: string[] = []
   const options: Record<string, string | boolean> = {}
   for (let index = 1; index < argv.length; index++) {

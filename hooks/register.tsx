@@ -23,6 +23,7 @@ import {
   toolCallParts, THOUGHT_KIND, type Ledger, type PendingRow,
 } from './conversation'
 import { TitleScanner, transcriptRead } from './title'
+import { DeltaCli } from './cli'
 
 type Runtime = EngineInterface
 type Entry = { sequence: number; files: string[]; digest: string }
@@ -67,8 +68,10 @@ type RemoteTurn = { turnId: string | null; name: string; id?: string; since?: nu
 type ProgressTone = 'active' | 'done' | 'error'
 type JoinPlan = { session: string; cwd: string; locator: string; thread: string }
 type JoinRequest = { session: string; cwd: string; locator: string; fresh?: string; clearing?: boolean; cancelled?: boolean }
+type ShareRequest = { session: string; cwd: string; cancelled?: boolean }
 
 const encoder = new TextEncoder()
+const cli = new DeltaCli()
 const MAX_LINE = 16 * 1024 * 1024
 const MAX_RECONNECT_DELAY = 30_000
 /** A mount may materialize several large checkouts before it answers. */
@@ -99,7 +102,7 @@ let inFlight = 0
 let quiet: (() => void) | undefined
 let outbox = ''
 let joining: JoinRequest | undefined
-let sharing: string | undefined
+let sharing: ShareRequest | undefined
 /**
  * Sessions whose CLI build already answered a compatible recording contract, each with the newest
  * version both speak; a refusal is never remembered.
@@ -396,8 +399,9 @@ async function consumeConversation(
       if (!ownsObserver()) return
       if (!boundDirectory(binding))
         throw new Error('No attached thread selected; run /delta share from the intended Git checkout')
-      const argv = ['delta', '--json', 'thread', 'watch', binding.locator ?? binding.thread,
+      const argv = [await resolveCli($), '--json', 'thread', 'watch', binding.locator ?? binding.thread,
         '--source', 'claude-code', '--external-id', session]
+      if (!ownsObserver()) return
       stream = $.process.spawn({
         argv,
       })
@@ -980,10 +984,19 @@ async function readThreadStatus($: Runtime, thread: string, session: string, sig
     '--source', 'claude-code', '--external-id', session], 'thread status', signal))
 }
 
+async function resolveCli($: Runtime, allowInstall = false) {
+  return cli.resolve((argv, init) => $.process.run(argv, init), allowInstall,
+    (text) => setProgress($, text, 'active'), await $.env.get('OS') === 'Windows_NT')
+}
+
 async function readCommand($: Runtime, args: string[], name: string, signal: AbortSignal, timeoutMs = 120_000): Promise<string> {
   if (signal.aborted) throw new Error(`Delta ${name} cancelled`)
   let stream: ReturnType<Runtime['process']['spawn']>
-  try { stream = $.process.spawn({ argv: ['delta', '--json', ...args] }) }
+  try {
+    const executable = await resolveCli($)
+    if (signal.aborted) throw new Error(`Delta ${name} cancelled`)
+    stream = $.process.spawn({ argv: [executable, '--json', ...args] })
+  }
   catch (error) { throw new DeltaCommandError('process_failed', `${name}: cannot run Delta CLI (${String(error)})`) }
   return readCommandStream(stream, name, signal,
     (milliseconds, deadline) => $.clock.sleep(milliseconds, { signal: deadline }), timeoutMs)
@@ -1010,10 +1023,11 @@ async function requireContract($: Runtime, session: string) {
 async function readThreadContract($: Runtime): Promise<ThreadContract | undefined> {
   let result: Awaited<ReturnType<Runtime['process']['run']>>
   try {
-    result = await $.process.run(['delta', '--json', 'thread', 'contract'], { timeoutMs: CONTRACT_TIMEOUT_MS })
+    const executable = await resolveCli($)
+    result = await $.process.run([executable, '--json', 'thread', 'contract'], { timeoutMs: CONTRACT_TIMEOUT_MS })
   } catch (error) {
     // The same failure a share or a status read reports when the CLI is missing or cannot start.
-    throw new Error(`thread contract: cannot run Delta CLI (${String(error)}). Install the matching new Delta CLI and app, and put delta on PATH.`)
+    throw new Error(`thread contract: cannot run Delta CLI (${String(error)}). Repair the selected Delta CLI and retry.`)
   }
   if (result.isStdoutTruncated || result.isStderrTruncated)
     throw new Error('thread contract: Delta CLI output truncated; no contract assumed')
@@ -1215,10 +1229,12 @@ async function cleanupOutbox($: Runtime, session: string) {
   }
 }
 
-async function command($: Runtime, args: string[], name: string) {
+async function command($: Runtime, args: string[], name: string, check?: () => Promise<void>) {
   let result: Awaited<ReturnType<Runtime['process']['run']>>
   try {
-    result = await $.process.run(['delta', '--json', ...args], { timeoutMs: 120_000 })
+    const executable = await resolveCli($)
+    if (check) await check()
+    result = await $.process.run([executable, '--json', ...args], { timeoutMs: 120_000 })
   } catch (error) {
     throw new Error(`${name}: cannot run Delta CLI (${String(error)}). Install the matching new Delta CLI and app, and put delta on PATH.`)
   }
@@ -1294,7 +1310,7 @@ async function drainPending($: Runtime, session: string): Promise<boolean> {
         turnSequences.push(turnSequence)
         if (collected.bytes >= 2_000_000) break
       }
-      const argv = ['delta', '--json', 'thread', 'append', binding.locator ?? binding.thread,
+      const argv = [await resolveCli($), '--json', 'thread', 'append', binding.locator ?? binding.thread,
         '--source', 'claude-code', '--external-id', session]
       let result: Awaited<ReturnType<Runtime['process']['run']>>
       try {
@@ -1713,7 +1729,17 @@ async function checkoutRoot($: Runtime): Promise<string> {
   return result.stdout.trim()
 }
 
-async function share($: Runtime, session: string): Promise<string> {
+async function assertShareSession($: Runtime, request: ShareRequest) {
+  const session = await $.session.id()
+  const cwd = await $.session.cwd()
+  if (request.cancelled || sharing !== request || session !== request.session || cwd !== request.cwd)
+    throw new Error('The Claude session or folder changed during share; the obsolete share was stopped')
+}
+
+async function share($: Runtime, request: ShareRequest): Promise<string> {
+  const { session } = request
+  const check = () => assertShareSession($, request)
+  await assertShareSession($, request)
   const runtime = stateFor(session)
   if (runtime.currentTurnId) throw new Error('Wait for the current Claude turn to finish before sharing or reattaching')
   let binding = await serial(() => load($, session))
@@ -1724,19 +1750,26 @@ async function share($: Runtime, session: string): Promise<string> {
   if (runtime.captureFailure || binding.captureFailure)
     throw new Error(`a stored Claude row could not be saved locally (${runtime.captureFailure ?? binding.captureFailure}); sharing is paused to avoid an incomplete transcript`)
   // Refuse a CLI this plugin cannot record against before its snapshot fills the local outbox.
+  await resolveCli($, true)
+  await assertShareSession($, request)
   await requireContract($, session)
+  await assertShareSession($, request)
   // Every recorded path is shown relative to the checkout this share attaches.
   const root = await checkoutRoot($)
+  await assertShareSession($, request)
   if (!binding.snapshot) {
     let release!: () => void
     gate = new Promise<void>((resolve) => { release = resolve })
     try {
       if (inFlight) await new Promise<void>((resolve) => { quiet = resolve })
+      await assertShareSession($, request)
       // Appends begun after the gate cannot reach the transcript until the snapshot is read.
       setProgress($, 'Exporting earlier messages…', 'active', [2, 5])
       const snapshot = snapshotMessages(await $.session.messages({ as: 'api' }))
+      await assertShareSession($, request)
       setProgress($, `Exporting ${snapshot.length} earlier messages…`, 'active', [2, 5])
       const summaries = await $.session.messages()
+      await assertShareSession($, request)
       const toolResults = new Map(summaries.flatMap((row) =>
         row.toolUses.map((use) => [use.tool_use_id, use] as const)))
       for (const [id, tool] of toolResults) {
@@ -1746,6 +1779,7 @@ async function share($: Runtime, session: string): Promise<string> {
       // Snapshot only the normalized, post-compaction main conversation.
       await serial(async () => {
         let state = await load($, session)
+        await assertShareSession($, request)
         for (const [index, message] of snapshot.entries()) {
           rememberToolResults(runtime, message)
           const updates = messageUpdates(message, `snapshot:${index}`, runtime.tools.structuredResults,
@@ -1769,8 +1803,9 @@ async function share($: Runtime, session: string): Promise<string> {
   runtime.pauses.clear()
   runtime.deliveryNotice = undefined
   binding = await serial(() => load($, session))
+  await assertShareSession($, request)
   if (!binding.thread) {
-    const created = await command($, ['thread', 'create', '--source', 'claude-code', '--external-id', session], 'thread create')
+    const created = await command($, ['thread', 'create', '--source', 'claude-code', '--external-id', session], 'thread create', check)
     validateCreationReceipt(created)
     if (!created.created) {
       const status = await readThreadStatus($, created.thread_id, session)
@@ -1784,11 +1819,13 @@ async function share($: Runtime, session: string): Promise<string> {
     await serial(async () => save($, { ...await load($, session), thread: created.thread_id }))
     binding = await serial(() => load($, session))
   }
+  await assertShareSession($, request)
   await stopConversation()
+  await assertShareSession($, request)
   // Only now that the watcher is stopped is its pause true; the restarted watch lifts it once live.
   pauseCheckout(runtime, 'watcher')
   setProgress($, 'Attaching the checkout…', 'active', [3, 5])
-  const attached = await command($, ['worktree', 'attach', root, '--thread', binding.thread!], 'worktree attach')
+  const attached = await command($, ['worktree', 'attach', root, '--thread', binding.thread!], 'worktree attach', check)
   validateAttachmentReceipt(attached, root)
   await serial(async () => {
     const current = await load($, session)
@@ -1797,11 +1834,14 @@ async function share($: Runtime, session: string): Promise<string> {
       throw new Error('Delta returned a different checkout reference or directory; the existing binding was preserved')
     await save($, { ...current, checkout: root, checkoutReference: attached.reference })
   })
+  await assertShareSession($, request)
   setProgress($, 'Publishing the thread…', 'active', [4, 5])
-  const shared = await command($, ['thread', 'share', binding.thread!, '--visibility', 'organization'], 'thread share')
+  const shared = await command($, ['thread', 'share', binding.thread!, '--visibility', 'organization'], 'thread share', check)
   validatePublicationReceipt(shared, binding.thread)
   await serial(async () => save($, { ...await load($, session), url: shared.url }))
+  await assertShareSession($, request)
   await startConversation($, session)
+  await assertShareSession($, request)
   setProgress($, 'Uploading files…', 'active', [5, 5])
   await drain($, session)
   if (isPaused(runtime))
@@ -1809,6 +1849,7 @@ async function share($: Runtime, session: string): Promise<string> {
   if (runtime.captureFailure || runtime.unsaved.length)
     throw new Error('a live row could not be saved locally; fix the outbox error and retry /delta share')
   await verifyCheckout($, await load($, session))
+  await assertShareSession($, request)
   return shared.url
 }
 
@@ -1816,17 +1857,19 @@ async function share($: Runtime, session: string): Promise<string> {
  * Run a share on the clock so `/delta share` returns at once: the band reports progress, and once
  * the share succeeds it keeps the link on hand, so nothing is added to the transcript.
  */
-async function runShare($: Runtime, session: string) {
+async function runShare($: Runtime, request: ShareRequest) {
+  const { session } = request
   try {
-    const url = await share($, session)
+    const url = await share($, request)
     finishProgress($, 'Shared', 'done')
     await $.ui.log(`Delta share link: ${url}`, { to: 'debug' })
   } catch (error) {
+    if (request.cancelled || sharing !== request) return
     const text = `Delta sharing failed: ${String(error)}. Fix the issue and retry ${recoveryCommand(stateFor(session).binding)}; saved records retain their sequence.`
     setProgress($, text, 'error')
     await $.ui.log(text, { to: 'transcript' })
   } finally {
-    if (sharing === session) sharing = undefined
+    if (sharing === request) sharing = undefined
   }
 }
 
@@ -1846,6 +1889,7 @@ async function join($: Runtime, request: JoinRequest) {
     if (activeBackgroundAgents(await $.agent.list()))
       throw new Error('Stop background agents and teammates before joining; an idle main turn is not sufficient')
     // Refuse a CLI this plugin cannot record against before any transition, mount, or clear.
+    await resolveCli($, true)
     await requireContract($, request.session)
     if (pending.joinTransition) {
       plan = pending.joinTransition
@@ -2088,8 +2132,8 @@ async function releaseMounts($: Runtime, session: string) {
   try { binding = await $.store.get(key(session)) as Binding | undefined }
   catch { return }
   if (!binding?.joined || binding.session !== session || !binding.thread) return
-  const argv = ['delta', '--json', 'thread', 'unmount', binding.locator ?? binding.thread, '--owner', binding.owner ?? session]
   try {
+    const argv = [await resolveCli($), '--json', 'thread', 'unmount', binding.locator ?? binding.thread, '--owner', binding.owner ?? session]
     const result = await $.process.run(argv, { timeoutMs: RELEASE_TIMEOUT_MS })
     if (result.exitCode !== 0) await $.ui.log(`Delta thread unmount failed: ${result.stderr.trim() || result.stdout.trim()}`, { to: 'debug' })
   } catch (error) { await $.ui.log(`Delta thread unmount did not run: ${String(error)}`, { to: 'debug' }) }
@@ -2486,6 +2530,10 @@ export function register(on: On) {
     </Box>
   })
   on('session.end', async ($, e, next) => {
+    if (sharing?.session === e.sessionId) {
+      sharing.cancelled = true
+      sharing = undefined
+    }
     if (joining && e.sessionId === (joining.fresh ?? joining.session) &&
         !(joining.clearing && e.reason === 'clear' && e.sessionId === joining.session)) {
       joining.cancelled = true
@@ -2573,6 +2621,7 @@ export function register(on: On) {
     if (joining) return { text: 'A Delta join is already in progress. Wait for its result.' }
     if (sharing) return { text: 'A Delta share is already in progress. Wait for its result.' }
     const session = await $.session.id()
+    let shareRequest: ShareRequest | undefined
     try {
       if (session !== active || !stateFor(session).binding) await activate($, session)
       if (locator) {
@@ -2589,23 +2638,26 @@ export function register(on: On) {
       }
       if (stateFor(session).currentTurnId)
         return { text: 'Wait for the current Claude turn to finish before sharing.' }
-      sharing = session
+      const request = { session, cwd: await $.session.cwd() }
+      sharing = shareRequest = request
       setProgress($, 'Preparing to share…', 'active', [1, 5])
       if (hasInteractiveSurface(await $.session.surfaces())) {
-        $.clock.after(0, () => runShare($, session))
+        $.clock.after(0, () => runShare($, request))
         return {}
       }
       // Cloud and other headless hosts cannot show the band or be relied on to forward
       // background UI notices. Keep the command open so its caller receives the outcome.
-      const url = await share($, session)
+      const url = await share($, request)
       finishProgress($, 'Shared', 'done')
-      if (sharing === session) sharing = undefined
+      if (sharing === request) sharing = undefined
       return { text: `Delta share link: ${url}` }
     }
     catch (error) {
       const text = `Delta sharing failed: ${String(error)}. Fix the issue and retry ${locator ? `/delta join ${locator}` : recoveryCommand(stateFor(session).binding)}; saved records retain their sequence.`
-      if (sharing === session) sharing = undefined
-      setProgress($, text, 'error')
+      if (!shareRequest || sharing === shareRequest) {
+        if (sharing === shareRequest) sharing = undefined
+        setProgress($, text, 'error')
+      }
       return { text }
     }
   })
