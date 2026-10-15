@@ -416,7 +416,7 @@ forking into a fresh Claude session permits a new bounded export.
 
 ### Product telemetry
 
-Every Delta CLI child process receives `DELTA_CLI_INTEGRATION=claude_code`.
+Each Delta CLI thread command receives `DELTA_CLI_INTEGRATION=claude_code`.
 Delta uses that command's marker for `integration` on thread creation, sharing,
 sharing failures, joining, joining failures, and external-turn starts. It does not infer this value from a thread's
 creation or its latest producer. Older Delta clients ignore the environment
