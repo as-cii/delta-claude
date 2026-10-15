@@ -30,7 +30,7 @@ import {
   type Interaction, type Organization, type SetupEnv,
 } from './setup'
 import { DeltaCli } from './cli'
-import { PendingAuthenticationError, requireAuthentication } from './auth'
+import { PendingAuthenticationError, requireAuthentication, type AuthenticationHost } from './auth'
 import {
   HANDOFF_ACKNOWLEDGEMENT, HANDOFF_EXPIRY_MS, HANDOFF_PROMPT, newSessionLink, parseHandoff, type Handoff,
 } from './handoff'
@@ -1177,6 +1177,16 @@ function followUpload($: Runtime, session: string) {
   })
 }
 
+/** Sign-in's view of the session; `$` stays in this file, as Claude Code's loader requires. */
+async function authenticationHost($: Runtime): Promise<AuthenticationHost> {
+  return {
+    interactive: hasInteractiveSurface(await $.session.surfaces()),
+    windows: await $.env.get('OS') === 'Windows_NT',
+    sleep: (milliseconds, signal) => $.clock.sleep(milliseconds, { signal }),
+    spawn: (argv) => $.process.spawn({ argv }),
+  }
+}
+
 async function resolveCli($: Runtime, allowInstall = false) {
   return cli.resolve((argv, init) => $.process.run(argv, {
     ...init, env: { ...init?.env, DELTA_CLI_INTEGRATION: 'claude_code' },
@@ -2040,7 +2050,7 @@ async function share($: Runtime, request: ShareRequest): Promise<string> {
   await assertShareSession($, request)
   await requireContract($, session)
   await assertShareSession($, request)
-  await requireAuthentication($, await resolveCli($), check, async (text) => {
+  await requireAuthentication(await authenticationHost($), await resolveCli($), check, async (text) => {
     await check()
     setProgress($, 'Waiting for Delta sign-in…', 'active')
     await $.ui.log(text, { to: 'transcript' })
@@ -2191,7 +2201,7 @@ async function join($: Runtime, request: JoinRequest) {
       if (await $.session.cwd() !== request.cwd)
         throw new Error('The folder changed during sign-in; retry join from the intended folder')
     }
-    await requireAuthentication($, await resolveCli($), check, async (text) => {
+    await requireAuthentication(await authenticationHost($), await resolveCli($), check, async (text) => {
       await check()
       setProgress($, 'Waiting for Delta sign-in…', 'active')
       await $.ui.log(text, { to: 'transcript' })

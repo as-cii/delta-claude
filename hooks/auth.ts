@@ -1,9 +1,19 @@
 import type { EngineInterface } from 'claude-code'
 import { readCommandStream } from './command-reader'
 import { commandErrorFromEnvelope } from './thread-commands'
-import { hasInteractiveSurface } from './lifecycle'
 
 export class PendingAuthenticationError extends Error {}
+
+/**
+ * What sign-in needs from the session, as values and callbacks. Claude Code's loader refuses a
+ * module that passes `$` across an import, so `register.tsx` builds this from `$` itself.
+ */
+export type AuthenticationHost = {
+  interactive: boolean
+  windows: boolean
+  sleep: (milliseconds: number, signal: AbortSignal) => Promise<void>
+  spawn: (argv: string[]) => ReturnType<EngineInterface['process']['spawn']>
+}
 
 /** Quote the resolved executable for a POSIX shell or PowerShell, never PATH lookup. */
 export function authLoginCommand(executable: string, windows: boolean): string {
@@ -14,18 +24,17 @@ export function authLoginCommand(executable: string, windows: boolean): string {
 
 /** Authenticate only an explicit command, using the CLI's app-owned browser login. */
 export async function requireAuthentication(
-  runtime: Pick<EngineInterface, 'process' | 'clock' | 'session' | 'env'>,
+  host: AuthenticationHost,
   executable: string,
   check: () => Promise<void>,
   notice: (text: string) => Promise<void>,
 ) {
-  const interactive = hasInteractiveSurface(await runtime.session.surfaces())
-  const windows = await runtime.env.get('OS') === 'Windows_NT'
+  const { interactive, windows } = host
   const recovery = `Resolve access${windows ? ', then run in PowerShell' : ', then run in your shell'}: ${authLoginCommand(executable, windows)}. After signing in again, retry /delta share or /delta join <link>.`
   const stopped = new AbortController()
   const monitor = async () => {
     while (!stopped.signal.aborted) {
-      await runtime.clock.sleep(250, { signal: stopped.signal })
+      await host.sleep(250, stopped.signal)
       await check()
     }
   }
@@ -33,9 +42,9 @@ export async function requireAuthentication(
   const request = async (args: string[], timeout = 60_000) => {
     await check()
     if (stopped.signal.aborted) throw new Error('Delta sign-in stopped')
-    const stream = runtime.process.spawn({ argv: [executable, '--json', 'auth', ...args] })
+    const stream = host.spawn([executable, '--json', 'auth', ...args])
     const text = await readCommandStream(stream, `auth ${args[0]}`, stopped.signal,
-      (ms, signal) => runtime.clock.sleep(ms, { signal }), timeout,
+      host.sleep, timeout,
       // Auth reports valid signed-out/denied/cancelled outcomes with exit 1.
       (code, stdout) => {
         if (code === 0) return true
