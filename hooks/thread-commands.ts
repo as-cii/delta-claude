@@ -1,3 +1,5 @@
+import { samePath } from './paths'
+
 export type ThreadState = {
   thread_id: string
   url: string | null
@@ -388,7 +390,7 @@ export function validateThreadCheckout(
   if (state.worktrees.status === 'unavailable')
     throw new DeltaCommandError(state.worktrees.error.code, inspectionUnavailableMessage(state.worktrees.error), {}, state.worktrees.error.reason)
   const matches = state.worktrees.items.flatMap((worktree) => worktree.checkouts
-    .filter((checkout) => checkout.directory === binding.checkout &&
+    .filter((checkout) => binding.checkout !== undefined && samePath(checkout.directory, binding.checkout) &&
       (binding.checkoutReference === undefined || worktree.reference === binding.checkoutReference) &&
       checkout.state === 'attached' && checkout.active !== false)
     .map((checkout) => ({ directory: checkout.directory, reference: worktree.reference })))
@@ -434,7 +436,7 @@ export function validateJoinedMounts(state: ThreadState, mounts: readonly { refe
   const items = state.worktrees.items
   for (const mount of mounts) {
     const ready = items.some((tree) => tree.reference === mount.reference && tree.checkouts.some((checkout) =>
-      checkout.directory === mount.directory && checkout.active === true && ['attached', 'detached'].includes(checkout.state)))
+      samePath(checkout.directory, mount.directory) && checkout.active === true && ['attached', 'detached'].includes(checkout.state)))
     if (!ready)
       throw new JoinNotReadyError(`The worktree "${mount.name}" is not mounted at ${mount.directory} yet. Wait for Delta to finish mounting it, or run /delta join with this thread's link to mount it again`)
   }

@@ -57,4 +57,11 @@ test('worktree changes name additions and removals, moving out of a checkout onl
     expect(result.removed.map((tree) => tree.name)).toEqual([...removed])
     expect(result.moves).toBe(moves)
   }
+  const mount = { ...delta, directory: String.raw`C:\checkout\delta` }
+  expect(worktreeChanges([mount], 'C:/checkout/delta',
+    { ...cliFixture('mount'), directory: mount.directory, worktrees: [mount] } as MountedThread))
+    .toEqual({ added: [], removed: [], moves: false })
+  expect(worktreeChanges([mount], 'C:/checkout/delta',
+    { ...cliFixture('mount'), directory: 'C:/folder', worktrees: [mount] } as MountedThread))
+    .toEqual({ added: [], removed: [], moves: true })
 })
