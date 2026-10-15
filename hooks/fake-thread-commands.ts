@@ -285,6 +285,10 @@ export function fakeThreads(on: On, options: {
     contractUnknownSubcommand: false,
     /** Every `thread contract` the plugin asked for, counted apart from the recording commands. */
     contractChecks: 0,
+    authCalls: [] as string[][],
+    authReplies: [] as { status: string; [key: string]: unknown }[],
+    holdAuth: undefined as Promise<void> | undefined,
+    authWaitClosed: false,
     cliMissing: false,
     cliSetups: [] as string[],
     holdCliSetup: undefined as ((install: boolean) => Promise<void> | undefined) | undefined,
@@ -678,6 +682,22 @@ export function fakeThreads(on: On, options: {
       const rest = new TextDecoder().decode(new TextEncoder().encode(text).subarray(Number(e.argv[2]!.slice(1)) - 1))
       for (let index = 0; index < rest.length; index += 7) yield { stream: 'stdout', text: rest.slice(index, index + 7) }
       return { value: { code: 0, signal: null } }
+    }
+    if (e.argv[2] === 'auth') {
+      fake.authCalls.push([...e.argv])
+      const reply = fake.authReplies.shift() ?? { status: 'signed_in', account: { account_id: 'user' } }
+      try {
+        if (e.argv[3] === 'wait' && fake.holdAuth) {
+          await Promise.race([fake.holdAuth, new Promise<void>((resolve) => {
+            next.signal.addEventListener('abort', () => resolve(), { once: true })
+          })])
+          if (next.signal.aborted) return { value: { code: null, signal: 'SIGTERM' } }
+        }
+        yield { stream: 'stdout', text: JSON.stringify(reply) }
+        return { value: { code: ['signed_in', 'pending'].includes(reply.status) ? 0 : 1, signal: null } }
+      } finally {
+        if (e.argv[3] === 'wait') fake.authWaitClosed = true
+      }
     }
     const operation = cliArguments(e.argv)?.positionals[1]
     if (operation === 'mount') {

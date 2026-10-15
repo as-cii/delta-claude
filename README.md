@@ -18,8 +18,21 @@ and errors appear in Claude; retry share/join after resolving an installation er
 On Windows, install Delta from https://delta.dev and put `delta.exe` on `PATH`
 before running Claude Code.
 
-Sign in with `delta auth login` when requested; if Delta is not on your shell's
-PATH, use the installed app or its absolute CLI path.
+Each explicit `/delta share` or `/delta join <link>` checks sign-in after finding
+or installing Delta. If needed, Delta opens your browser and Claude shows a
+sign-in link. Finish signing in there; the command waits and then continues
+automatically. The link expires after 15 minutes; retry the command if sign-in
+expires or is cancelled. Without an interactive surface, share returns the
+sign-in link immediately; finish sign-in and run `/delta share` again.
+Loading or resuming the plugin never installs Delta or
+starts sign-in. Changing Claude sessions stops the command, not a sign-in another
+Delta client may also be using.
+
+The plugin does not switch accounts or choose an organization for you. If Delta
+asks for an organization, select it in Delta (or with `delta org switch <ID>`)
+and retry. If the CLI is not on `PATH`, use its absolute path.
+If access is denied, resolve the approval or terms requirement at the shown URL,
+then run the displayed `auth login` command to refresh sign-in before retrying.
 Delta's common, windowless client owns the account store, synchronization, and
 checkout mounts. No GUI window is required; the plugin's watcher is only an
 observer, not an authentication service or mount owner.

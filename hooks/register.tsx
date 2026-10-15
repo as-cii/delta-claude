@@ -24,6 +24,7 @@ import {
 } from './conversation'
 import { TitleScanner, transcriptRead } from './title'
 import { DeltaCli } from './cli'
+import { PendingAuthenticationError, requireAuthentication } from './auth'
 import {
   HANDOFF_ACKNOWLEDGEMENT, HANDOFF_EXPIRY_MS, HANDOFF_PROMPT, newSessionLink, parseHandoff, type Handoff,
 } from './handoff'
@@ -1779,6 +1780,12 @@ async function share($: Runtime, request: ShareRequest): Promise<string> {
   await assertShareSession($, request)
   await requireContract($, session)
   await assertShareSession($, request)
+  await requireAuthentication($, await resolveCli($), check, async (text) => {
+    await check()
+    setProgress($, 'Waiting for Delta sign-in…', 'active')
+    await $.ui.log(text, { to: 'transcript' })
+  })
+  await check()
   // Every recorded path is shown relative to the checkout this share attaches.
   const root = await checkoutRoot($)
   await assertShareSession($, request)
@@ -1916,6 +1923,17 @@ async function join($: Runtime, request: JoinRequest) {
     // Refuse a CLI this plugin cannot record against before any transition, mount, or clear.
     await resolveCli($, true)
     await requireContract($, request.session)
+    const check = async () => {
+      await assertJoinSession($, request.session, request)
+      if (await $.session.cwd() !== request.cwd)
+        throw new Error('The folder changed during sign-in; retry join from the intended folder')
+    }
+    await requireAuthentication($, await resolveCli($), check, async (text) => {
+      await check()
+      setProgress($, 'Waiting for Delta sign-in…', 'active')
+      await $.ui.log(text, { to: 'transcript' })
+    })
+    await check()
     if (pending.joinTransition) {
       plan = pending.joinTransition
       fresh = request.session
@@ -2872,6 +2890,10 @@ export function register(on: On) {
       return { text: `Delta share link: ${url}` }
     }
     catch (error) {
+      if (error instanceof PendingAuthenticationError) {
+        if (sharing === shareRequest) sharing = undefined
+        return { text: error.message }
+      }
       const text = `Delta sharing failed: ${String(error)}. Fix the issue and retry ${locator ? `/delta join ${locator}` : recoveryCommand(stateFor(session).binding)}; saved records retain their sequence.`
       if (!shareRequest || sharing === shareRequest) {
         if (sharing === shareRequest) sharing = undefined

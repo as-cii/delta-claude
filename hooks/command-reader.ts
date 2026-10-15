@@ -9,6 +9,7 @@ export async function readCommandStream(
   stream: Stream, name: string, signal: AbortSignal,
   sleep: (milliseconds: number, signal: AbortSignal) => Promise<unknown>,
   timeoutMs = 120_000,
+  acceptsExit = (code: number | null, _stdout: string) => code === 0,
 ): Promise<string> {
   const encoder = new TextEncoder()
   const limit = 16 * 1024 * 1024
@@ -35,7 +36,7 @@ export async function readCommandStream(
       if (timedOut) throw new DeltaCommandError('timeout', `Delta ${name} timed out`)
       if (piece.done) {
         const stdout = chunks.join('')
-        if (piece.value.code !== 0) {
+        if (!acceptsExit(piece.value.code, stdout)) {
           let failure: DeltaCommandError | undefined
           try { failure = commandErrorFromEnvelope(JSON.parse(stdout)?.error, name) } catch {}
           throw failure ?? new DeltaCommandError('process_failed',

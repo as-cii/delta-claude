@@ -59,6 +59,11 @@ describe('joining', () => {
   for (const surface of ['terminal'] as const) test(`${surface} joins in a fresh session and separate exact mount without exporting, attaching, publishing, or executing`, async ($, on) => {
     const fake = sharedThread(on, $)
     fake.cliMissing = true
+    fake.authReplies = [
+      { status: 'signed_out' },
+      { status: 'pending', login_id: 'join-login', url: 'https://example.com/login', expires_at: '2099-01-01T00:15:00Z' },
+      { status: 'signed_in', account: { account_id: 'user' } },
+    ]
     fake.surfaces = [surface]
     const previousSession = fake.session
     const old = { session: previousSession, snapshot: false, next: 1, pending: [] }
@@ -75,6 +80,9 @@ describe('joining', () => {
     expect(fake.sessionCommands).toEqual([])
     await finishJoin(fake)
     expect(fake.cliSetups).toEqual(['discover', 'install'])
+    expect(fake.authCalls.map((argv) => argv.slice(2))).toEqual([
+      ['auth', 'status'], ['auth', 'login', '--no-wait'], ['auth', 'wait', 'join-login'],
+    ])
     const binding = fake.store.get(`session:${fake.session}`) as any
     expect(fake.session).not.toBe(previousSession)
     expect(await bandText($)).toContain(LIVE)
