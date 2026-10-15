@@ -1979,6 +1979,16 @@ describe('native turns', () => {
     await $.turn.start(turnStart('native-new'))
     await fake.clock.settle()
     const second = fake.starts()[1]!
+    // Claude 2.1.299+ raises turn.start for a child agent's own loop, carrying `agentId` on it and
+    // on its turn.complete. Neither may bind this session's turn, so the main turn keeps running.
+    await $.turn.start({ ...turnStart('child'), agentId: 'child-agent' })
+    await $.turn.complete({ ...turnComplete('child'), agentId: 'child-agent' })
+    await $.tool.call(bash('tool-main', 'echo main'))
+    await fake.clock.settle()
+    expect(fake.starts()).toEqual([first, second])
+    // This turn's output names the main sequence the child's turn never took over.
+    expect(fake.updates().find((record) => record.update?.toolCallId === 'tool-main')?.turnSequence)
+      .toBe(second)
     await $.turn.complete({ ...turnComplete('native-new'), agentId: 'subagent' })
     await $.turn.complete(turnComplete('native-old'))
     await fake.clock.settle()

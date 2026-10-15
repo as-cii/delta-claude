@@ -2602,6 +2602,10 @@ export function register(on: On) {
   }).catch(() => ({ drop: 'Delta could not safely prepare this shared turn. Retry after the watcher is ready.' }))
 
   on('turn.start', async ($, e, next) => {
+    // Claude 2.1.299+ raises turn.start inside a child agent's or teammate's own loop, with
+    // `agentId` set. That loop is not the shared conversation: only the main loop's turns may
+    // bind `currentTurnId` or open an execution.
+    if (e.agentId !== undefined) return next(e)
     const session = await $.session.id()
     const runtime = stateFor(session)
     runtime.currentTurnId = e.turnId
