@@ -284,6 +284,7 @@ export function fakeThreads(on: On, options: {
     ignoreReadCancellation: false,
     /** API export used by the initial share. */
     messages: options.messages ?? [] as ApiMessage[],
+    toolResult: { stdout: 'tool output', stderr: '', interrupted: false } as unknown,
     exports: 0,
     appendFaults: [] as AppendFault[],
     /** Every append fails before accepting anything until cleared. */
@@ -612,7 +613,7 @@ export function fakeThreads(on: On, options: {
       return (fake.answerQuestion?.(e as never) ?? { deny: 'the person dismissed the question' }) as never
     }
     if (fake.holdTool) await fake.holdTool
-    return { result: { stdout: 'tool output', stderr: '', interrupted: false } } as any
+    return { result: fake.toolResult } as any
   })
   on('fs.write', ($, e) => {
     if (fake.failWrite) throw new Error('disk full')

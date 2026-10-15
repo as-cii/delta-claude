@@ -152,6 +152,7 @@ describe('thread commands', () => {
     expect(records[0]).toMatchObject({ update: { content: [{ text: 'first' }] } })
     expect(records.at(-1)).toMatchObject({ update: { content: [{ text: 'third' }] } })
     expect(records.every((record) => record.turnSequence === undefined)).toBe(true)
+    expect(records.every((record) => record.update?._meta?.delta === undefined)).toBe(true)
 
     fake.messages = [text('changed export must not be imported')]
     expect(await fake.share($)).toBe(url)
@@ -160,6 +161,61 @@ describe('thread commands', () => {
     expect(fake.records()).toEqual(records)
     expect(fake.exports).toBe(1)
     expect(fake.server.mount).toMatchObject({ thread: fake.threadId, directory: CHECKOUT })
+    fake.expectClean()
+  })
+
+  test('marks recorded live Claude messages and tool activity', async ($, on) => {
+    const fake = fakeThreads(on)
+    await $.session.start(sessionStart)
+    await fake.share($)
+    await $.prompt.submit(prompt('change it'))
+    await $.session.append({
+      door: 'prompt', uuid: 'live-user',
+      message: { type: 'user', role: 'user', content: [{ type: 'text', text: 'change it' }] },
+    })
+    await $.turn.start(turnStart('native-live'))
+    await $.session.append({
+      door: 'response', uuid: 'live-agent',
+      message: { type: 'assistant', role: 'assistant', content: [
+        { type: 'thinking', thinking: 'inspect', signature: 'opaque' },
+        { type: 'text', text: 'I will edit it.' },
+        { type: 'tool_use', id: 'edit-live', name: 'Edit', input: { file_path: '/repo/a' } },
+      ] },
+    })
+    fake.toolResult = {
+      filePath: '/repo/a', structuredPatch: [
+        { oldStart: 1, oldLines: 1, newStart: 1, newLines: 1, lines: ['-old', '+new'] },
+      ],
+    }
+    await $.tool.call({ tool: 'Edit', tool_use_id: 'edit-live', file_path: '/repo/a' })
+    await fake.clock.settle()
+
+    const live = fake.records().filter((record) =>
+      ['user_message', 'agent_message', 'agent_thought', 'tool_call_update']
+        .includes(record.update?.sessionUpdate))
+    expect(live.map((record) => [record.update?.sessionUpdate, record.update?._meta])).toEqual([
+      ['user_message', { delta: {
+        work_origin: 'external_agent', interaction_surface: 'cli', activity_kind: 'user_message',
+      } }],
+      ['agent_thought', {
+        claudeCode: { block: { type: 'thinking', thinking: 'inspect', signature: 'opaque' } },
+        delta: { work_origin: 'external_agent', interaction_surface: 'cli', activity_kind: 'agent_thought' },
+      }],
+      ['agent_message', { delta: {
+        work_origin: 'external_agent', interaction_surface: 'cli', activity_kind: 'agent_message',
+      } }],
+      ['tool_call_update', { delta: {
+        work_origin: 'external_agent', interaction_surface: 'cli', activity_kind: 'tool_call',
+      } }],
+      ['tool_call_update', { delta: {
+        work_origin: 'external_agent', interaction_surface: 'cli', activity_kind: 'edit',
+      } }],
+    ])
+    expect(live.filter((record) => record.update?.sessionUpdate === 'tool_call_update')
+      .map((record) => record.update?.toolCallId)).toEqual(['edit-live', 'edit-live'])
+
+    await $.turn.complete(turnComplete('native-live'))
+    await fake.clock.settle()
     fake.expectClean()
   })
 
@@ -1014,7 +1070,7 @@ describe('thread commands', () => {
     fake.expectClean()
   })
 
-  test('an acknowledgment that cannot be saved keeps its record and replays it', async ($, on) => {
+  test('an acknowledgment that cannot be saved replays the exact marked record after restart', async ($, on) => {
     const fake = fakeThreads(on, { messages: [text('one')] })
     await $.session.start(sessionStart)
     await fake.share($)
@@ -1026,8 +1082,17 @@ describe('thread commands', () => {
     expect(fake.records().map((record) => record.sequence)).toEqual([1, 2])
     const second = [...fake.files.keys()].filter((path) => /\/2-\d+\.json$/.test(path))
     expect(second.length).toBeGreaterThan(0)
+    const immutable = second.map((path) => fake.files.get(path)).join('')
+    expect(JSON.parse(immutable).update._meta).toEqual({ delta: {
+      work_origin: 'external_agent', interaction_surface: 'cli', activity_kind: 'tool_call',
+    } })
+    const appendCalls = fake.appendCalls
     fake.failStoreSet = false
-    expect(await fake.share($)).toBe(`https://delta.dev/join/${fake.shareId}`)
+    await $.session.end(sessionEnd(fake.session))
+    await $.session.start(sessionStart)
+    await fake.clock.settle()
+    expect(fake.appendCalls).toBeGreaterThan(appendCalls)
+    expect(fake.server.records.get(2)?.line + '\n').toBe(immutable)
     await $.tool.call(bash('after', 'echo after'))
     await fake.clock.settle()
     expect(fake.records().map((record) => record.sequence)).toEqual([1, 2, 3])
@@ -1806,6 +1871,18 @@ describe('native turns', () => {
         ] } })
       await receive()
       expect(consumed).toBe(3)
+      const lifecycle = fake.updates().filter((record) => record.update.toolCallId === 'remote-bash')
+      expect(lifecycle.map((record) => [record.update.toolCallId, record.update._meta])).toEqual([
+        ['remote-bash', { delta: {
+          work_origin: 'external_agent', interaction_surface: 'cli', activity_kind: 'tool_call',
+        } }],
+        ['remote-bash', { delta: {
+          work_origin: 'external_agent', interaction_surface: 'cli', activity_kind: 'tool_call',
+        } }],
+        ['remote-bash', { delta: {
+          work_origin: 'external_agent', interaction_surface: 'cli', activity_kind: 'tool_call',
+        } }],
+      ])
       expect(rows).toHaveLength(1)
       expect(rows[0]!.text).toContain('tool call echo output (completed)')
       expect(rows[0]!.text).toContain('tool output')
@@ -2005,9 +2082,17 @@ describe('native turns', () => {
     // on its turn.complete. Neither may bind this session's turn, so the main turn keeps running.
     await $.turn.start({ ...turnStart('child'), agentId: 'child-agent' })
     await $.turn.complete({ ...turnComplete('child'), agentId: 'child-agent' })
+    await $.session.append({ door: 'response', uuid: 'child-message', agentId: 'child-agent',
+      message: { type: 'assistant', role: 'assistant', content: [
+        { type: 'text', text: 'child output' },
+        { type: 'tool_use', id: 'tool-child', name: 'Bash', input: { command: 'echo child' } },
+      ] } })
+    await $.tool.call({ ...bash('tool-child', 'echo child'), agentId: 'child-agent' })
     await $.tool.call(bash('tool-main', 'echo main'))
     await fake.clock.settle()
     expect(fake.starts()).toEqual([first, second])
+    expect(JSON.stringify(fake.records())).not.toContain('child output')
+    expect(JSON.stringify(fake.records())).not.toContain('tool-child')
     // This turn's output names the main sequence the child's turn never took over.
     expect(fake.updates().find((record) => record.update?.toolCallId === 'tool-main')?.turnSequence)
       .toBe(second)

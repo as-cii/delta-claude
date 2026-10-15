@@ -56,6 +56,11 @@ The plugin sends product telemetry to Delta: which integration ran each
 command, the plugin version, and when turns start and finish and how they ended.
 Telemetry events contain no messages, file paths, tool inputs, or error text.
 
+Live activity telemetry also identifies the external source and the command-line
+transport into Delta. It does not identify the person's interface. Several
+updates can belong to one tool call, so event rows are not counts of tool calls
+or edit operations. Historical imports do not produce these activity events.
+
 ## Development
 
 Validate the plugin and run its tests:

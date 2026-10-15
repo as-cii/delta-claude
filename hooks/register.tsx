@@ -106,6 +106,11 @@ type JoinRequest = { session: string; cwd: string; locator: string; fresh?: stri
 type ShareRequest = { session: string; cwd: string; cancelled?: boolean }
 
 const encoder = new TextEncoder()
+const LIVE_ACTIVITY_ORIGIN = {
+  work_origin: 'external_agent',
+  interaction_surface: 'cli',
+} as const
+type LiveActivityKind = 'user_message' | 'agent_message' | 'agent_thought' | 'tool_call' | 'edit'
 const cli = new DeltaCli()
 const MAX_LINE = 16 * 1024 * 1024
 const MAX_RECONNECT_DELAY = 30_000
@@ -1321,6 +1326,28 @@ function holdRows(runtime: SessionState, updates: Update[], turnId?: string) {
     toolId: update.sessionUpdate === 'tool_call_update' && typeof update.toolCallId === 'string'
       ? update.toolCallId : undefined,
   }))]
+}
+
+/** Mark a row observed live in this Claude host, without changing imported history. */
+function liveActivity(update: Update): Update {
+  let activityKind: LiveActivityKind | undefined
+  if (update.sessionUpdate === 'user_message' || update.sessionUpdate === 'agent_message' ||
+      update.sessionUpdate === 'agent_thought') activityKind = update.sessionUpdate
+  else if (update.sessionUpdate === 'tool_call_update') {
+    const structuredEdit = Array.isArray(update.content) && update.content.some((item) =>
+      item !== null && typeof item === 'object' && !Array.isArray(item) &&
+      (item as Record<string, unknown>).type === 'diff')
+    activityKind = structuredEdit ? 'edit' : 'tool_call'
+  }
+  if (!activityKind) return update
+  const metadata = update._meta !== null && typeof update._meta === 'object' && !Array.isArray(update._meta)
+    ? update._meta as Record<string, unknown> : {}
+  const delta = metadata.delta !== null && typeof metadata.delta === 'object' && !Array.isArray(metadata.delta)
+    ? metadata.delta as Record<string, unknown> : {}
+  return {
+    ...update,
+    _meta: { ...metadata, delta: { ...delta, ...LIVE_ACTIVITY_ORIGIN, activity_kind: activityKind } },
+  }
 }
 
 function key(session: string) { return `session:${session}` }
@@ -3776,7 +3803,7 @@ export function register(on: On) {
         if (message) {
           rememberToolResults(runtime, message)
           const updates = messageUpdates(message, stored.uuid, runtime.tools.structuredResults,
-            { root: boundDirectory(runtime.binding), omitted: runtime.tools.omitted })
+            { root: boundDirectory(runtime.binding), omitted: runtime.tools.omitted }).map(liveActivity)
           // Output from the turn Claude is running waits for that turn's scoped start record, so
           // it names its own turn rather than the turn before it. The prompt starting a turn is
           // held the same way, because its start record is written after its row.
@@ -3832,13 +3859,13 @@ export function register(on: On) {
       const update = resultUpdate(e.tool_use_id, e.tool, result.result, !!result.isError, root)
       runtime.tools.structuredResults.set(e.tool_use_id, update)
       const row = runtime.tools.toolResults.get(e.tool_use_id)
-      const updates = row
+      const updates = (row
         ? messageUpdates({ role: 'user', content: [row] }, `tool-result:${e.tool_use_id}`, runtime.tools.structuredResults)
         // Keep structured output visible in Delta without closing before the model's result text arrives.
         // The call's input row may not be stored yet, so this record names the call itself; the event
         // carries the tool's arguments beside its reserved keys.
         : [{ ...update, status: 'in_progress', name: e.tool,
-          ...toolInfo(e.tool, e, root) }]
+          ...toolInfo(e.tool, e, root) }]).map(liveActivity)
       if (hold) holdRows(runtime, updates, runtime.currentTurnId)
       else await persistUpdates($, session, updates, turnSequence)
       if (!hold && !runtime.captureFailure && runtime.binding.thread)
