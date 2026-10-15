@@ -15,8 +15,8 @@ import { PresenceTracker } from './presence'
 import {
   DeltaCommandError, DeltaSendError, appendFailure, classifyCommandFailure, permanentFailureAdvice,
   JoinNotReadyError, contractRefusal, contractVersion, parseThreadContract, parseThreadMount, parseThreadStatus, parseWatchEvent,
-  validateJoinedMounts, validateThreadFrontier, validateThreadCheckout, PLUGIN_CONTRACT_VERSION, TITLE_CONTRACT_VERSION, JOIN_INTENT_CONTRACT_VERSION,
-  type MountedThread, type ThreadContract, type ThreadMount, type ThreadReady, type ThreadState, type ThreadTurn, type WatchChild, type WatchEvent, type WatchItem,
+  validateJoinedMounts, parseThreadFork, validateThreadFrontier, validateThreadCheckout, OFFLINE_CONTRACT_VERSION, PLUGIN_CONTRACT_VERSION, TITLE_CONTRACT_VERSION, JOIN_INTENT_CONTRACT_VERSION,
+  type MountedThread, type ThreadContract, type ThreadMount, type ThreadReady, type ThreadState, type ThreadStatus, type ThreadTurn, type ThreadUpload, type WatchChild, type WatchEvent, type WatchItem,
 } from './thread-commands'
 import {
   RemoteView, addRows, commentAction, commentAuthor, commentDisplay, commentMarkdown, commentQuote,
@@ -24,6 +24,11 @@ import {
   toolCallParts, THOUGHT_KIND, type Ledger, type PendingRow,
 } from './conversation'
 import { TitleScanner, transcriptRead } from './title'
+import { policyPath, readProjectPolicy, recordsAutomatically, type ProjectPolicy } from './project-policy'
+import {
+  HEADLESS_REFUSAL, InteractionDismissed, InteractionUnavailable, offerOnboarding, organizationsFrom, runSetupWizard,
+  type Interaction, type Organization, type SetupEnv,
+} from './setup'
 import { DeltaCli } from './cli'
 import { PendingAuthenticationError, requireAuthentication } from './auth'
 import {
@@ -36,6 +41,8 @@ type RecordBody = { update: Update; turnSequence?: number }
 type Execution = { sequence: number; turnId?: string; lost?: true; endSequence?: number }
 type CleanupPlan = { session: string; root: string; next: number; pending: { sequence: number; files: string[] }[] }
 type ReadyGate = { promise: Promise<ThreadReady>; resolve: (ready: ThreadReady) => void; reject: (error: unknown) => void }
+/** The upload a repository's policy asks an automatic session for. */
+type AutoUpload = { mode: 'private' | 'organization'; organization: string }
 type Binding = {
   session: string
   thread?: string
@@ -58,6 +65,25 @@ type Binding = {
   /** Every worktree of a joined session's thread, as the last `thread mount` placed them. */
   mounts?: ThreadMount[]
   url?: string
+  /** The audience Delta reports for the thread, shown apart from the link. */
+  visibility?: 'private' | 'organization' | 'unlisted'
+  /** Delta's background upload of this thread, as status last reported it. */
+  upload?: ThreadUpload
+  /**
+   * Delta confirmed this automatic session's first background upload. Recorded so the first-upload
+   * operation stays over even if a later per-turn sync reports `uploading` again.
+   */
+  uploaded?: true
+  /**
+   * Set on a session this plugin created from the repository's policy: what it uploads. Such a
+   * session may participate while its thread is still local-only.
+   */
+  autoUpload?: AutoUpload
+  /**
+   * When the session really ended, from the engine clock. Absent while it may still be live, so a
+   * session in another process is never pruned; pruned sessions can no longer resume into their thread.
+   */
+  endedAt?: number
   snapshot: boolean
   captureFailure?: string
   next: number
@@ -116,11 +142,24 @@ let pluginData = ''
 let outbox = ''
 let joining: JoinRequest | undefined
 let sharing: ShareRequest | undefined
+/** A Keep or Discard the band started, so its two controls cannot both run at once. */
+let resolving = false
 /**
- * Sessions whose CLI build already answered a compatible recording contract, each with the newest
- * version both speak; a refusal is never remembered.
+ * Sessions whose CLI build already answered a compatible recording contract, each with the range it
+ * reported so the negotiated version and its offline capability are both known; a refusal is never
+ * remembered.
  */
 const contractVerified = new Map<string, number>()
+/**
+ * Whether this session records offline, on a CLI that speaks the contract where
+ * `append --acknowledge local` answers without the server. An automatic or
+ * shared session does: it writes to its own thread, and Delta's background uploader pushes what it
+ * acknowledged locally. A joined session writes into someone else's thread, so it keeps
+ * server-confirmed delivery and holds Claude while Delta is unreachable.
+ */
+function recordsOffline(session: string, binding: Binding | undefined): boolean {
+  return !!binding && !binding.joined && (contractVerified.get(session) ?? 0) >= OFFLINE_CONTRACT_VERSION
+}
 /** A read of what a transcript gained gives up after this long; the next turn's end reads it again. */
 const TITLE_TIMEOUT_MS = 10_000
 /**
@@ -159,6 +198,9 @@ type SessionState = {
   deliveryNotice?: string
   /** Why sending is being retried, for the band while the retry waits. */
   retryReason?: string
+  /** The next status read while Delta's background upload has not yet published the link; see followUpload. */
+  uploadRefresh?: Timer
+  uploadRefreshAttempts?: number
   unsaved: { updates: Update[]; turnSequence?: number }[]
   tools: ToolRecords
   cleanupTask?: Promise<void>
@@ -202,6 +244,11 @@ type SessionState = {
   mountRefresh?: Promise<void>
   /** Context rows for Claude that wait for a turn to end. */
   notes: string[]
+  /**
+   * Delta refused this offline session's recorded changes; the band offers Fork & Restore or
+   * Discard, and prompts keep retrying delivery until the person resolves it or an append succeeds.
+   */
+  refusedOffline?: boolean
 }
 const sessions = new Map<string, SessionState>()
 const presence = new PresenceTracker()
@@ -287,7 +334,7 @@ async function startConversation($: Runtime, session: string): Promise<ThreadRea
       feed.cancel = undefined
       setConnection($, 'stopped')
       const binding = stateFor(session).binding!
-      feed.error = `Delta watcher failed: ${String(error)}. Retry ${recoveryCommand(binding)} to reconnect.`
+      feed.error = `Delta watcher failed: ${String(error)}. ${recoveryAdvice(binding)} to reconnect.`
       $.ui.invalidate('ui.render')
     })
     return await readiness.promise
@@ -395,11 +442,11 @@ async function consumeConversation(
             // Access only: a worktree changed while disconnected is reconciled by its `worktrees`
             // event, and every prompt and delivery checks each mount.
             validateJoinedMounts(status, [])
-            await save($, { ...current, url: status.url ?? undefined }, ownsConnection)
+            await save($, { ...current, ...statusFields(status) }, ownsConnection)
           } else {
             const checkout = validateThreadCheckout(status, current)
             await save($, {
-              ...current, url: status.url ?? undefined,
+              ...current, ...statusFields(status),
               checkout: checkout.directory, checkoutReference: checkout.reference,
             }, ownsConnection)
           }
@@ -407,6 +454,7 @@ async function consumeConversation(
         if (!ownsConnection()) return
         inspected = true
         participate()
+        followUpload($, session)
       } catch (error) {
         if (ownsConnection()) {
           inspectionFailed = true
@@ -507,15 +555,19 @@ async function consumeConversation(
     }
     if (!ownsObserver()) return
     feed.ready = undefined
-    pauseCheckout(stateFor(session), 'watcher')
-    const running = stateFor(session).binding?.execution
-    if (running) await loseExecution($, session, running.sequence, 'The Delta watcher disconnected', ownsObserver)
-    if (!ownsObserver()) return
+    // A session that records offline keeps working when the watcher drops: its records stay queued
+    // and drain retries, so nothing pauses and no running turn is lost.
+    if (!recordsOffline(session, stateFor(session).binding)) {
+      pauseCheckout(stateFor(session), 'watcher')
+      const running = stateFor(session).binding?.execution
+      if (running) await loseExecution($, session, running.sequence, 'The Delta watcher disconnected', ownsObserver)
+      if (!ownsObserver()) return
+    }
     readiness.reject(failure)
     if (failure instanceof DeltaCommandError && failure.hints.retryable === false) {
       // A retryable failure is a lost connection, but a non-retryable one needs a person:
       // reconnecting cannot bring back a deleted thread or restored access on its own.
-      const notice = `Delta sharing paused: ${failure.message}. ${permanentFailureAdvice(failure.code)}, then run ${recoveryCommand(stateFor(session).binding)}.`
+      const notice = `Delta sharing paused: ${failure.message}. ${permanentFailureAdvice(failure.code, !!stateFor(session).binding?.autoUpload, failure.reason)}, then ${recoveryAdvice(stateFor(session).binding)}.`
       pauseCheckout(stateFor(session), 'delivery', notice)
       feed.cancel = undefined
       feed.readyGate = undefined
@@ -702,7 +754,7 @@ function syncSpinner($: Runtime) {
 
 /** A running share or join animates wherever it runs; a turn animates only on a live watch. */
 function spinnerRunning() {
-  return statusSpinnerRunning(feed)
+  return statusSpinnerRunning({ ...feed, progress: currentProgress() })
 }
 
 function stopSpinner() {
@@ -779,13 +831,24 @@ async function statusView($: Runtime): Promise<StatusState> {
   // A turn with an item still open, such as a long command, is working however long it is silent.
   const open = [...feed.view?.items.values() ?? []].some((item) => item.open)
   const doing = remote ? remoteActivity(remote, now) : undefined
+  const binding = state?.binding
+  // The visibility label names an organization; read the directory once, and a later redraw fills it.
+  if (binding?.visibility === 'organization' || binding?.upload?.organization_id) void loadOrganizationDirectory($)
   return {
     ...feed,
     // Within the grace after a drop, the band carries on as if the watch were live.
     connection: feed.reconnectTimer ? 'live' : feed.connection,
     deliveryPause: state?.pauses.get('delivery') ?? state?.pauses.get('verification'),
     retryReason: state?.retryTimer ? state.retryReason : undefined,
+    progress: currentProgress(),
     link: statusLink(),
+    audience: audienceLabel(binding),
+    // A refused offline thread keeps its controls until the person forks the changes or discards them.
+    conflict: state?.refusedOffline ? { fork: 'Fork & Restore', discard: 'Discard' } : undefined,
+    // Sharing waits for Claude's turn to finish, so the control says so rather than ignoring a press.
+    share: binding?.visibility === 'private' ? {
+      label: state?.currentTurnId ? 'Share after this turn' : `Share with ${organizationName(binding.upload?.organization_id) ?? 'organization'}`,
+    } : undefined,
     people: presence.roster(),
     children: feed.children,
     childrenStale: feed.connection !== 'live',
@@ -798,10 +861,42 @@ async function statusView($: Runtime): Promise<StatusState> {
   }
 }
 
+/** Who can see the thread, apart from whether it has a link: `Private`, `Shared with <org>`, or `Unlisted`. */
+function audienceLabel(binding: Binding | undefined): string | undefined {
+  if (!binding?.visibility) return undefined
+  if (binding.visibility === 'private') return 'Private'
+  if (binding.visibility === 'unlisted') return 'Unlisted'
+  return `Shared with ${organizationName(binding.upload?.organization_id) ?? 'your organization'}`
+}
+
 /**
- * The shared thread's link: the watched session's saved binding, which share, join and every watch
- * inspection keep current. Absent before a share has published one; while a share or join still
- * runs the band shows it without offering it.
+ * Delta's background upload of an automatic session, drawn on the band's row like a share's steps:
+ * its first upload until Delta confirms it, then only a failure. Activation only requests the upload,
+ * and Delta registers the thread a moment before it confirms the content, so the link is offered
+ * once the upload is confirmed; later per-turn syncs are not shown.
+ */
+function uploadProgress(binding: Binding | undefined): StatusState['progress'] {
+  if (!binding?.autoUpload || !binding.thread) return undefined
+  const upload = binding.upload
+  if (upload?.state === 'failed')
+    return { text: `Upload failed: ${upload.error?.message ?? upload.error?.reason ?? 'unknown reason'}`, tone: 'error' }
+  if (binding.uploaded) return undefined
+  // Delta reports a failure it retries itself as queued with its error, which is progress, not a failure.
+  if (upload?.state === 'queued' && upload.error)
+    return { text: `Retrying upload: ${upload.error.message || upload.error.reason || upload.error.code}`, tone: 'active' }
+  return { text: upload?.state === 'queued' ? 'Waiting to upload…' : 'Uploading to Delta…', tone: 'active' }
+}
+
+/** The operation the band draws: a share, join, or activation step, else an automatic session's upload. */
+function currentProgress(): StatusState['progress'] {
+  return feed.progress ?? uploadProgress(feed.session ? sessions.get(feed.session)?.binding : undefined)
+}
+
+/**
+ * The shared thread's link: the watched session's saved binding, which every status inspection keeps
+ * current. A URL says a thread exists, not that others can see it; the audience is shown apart.
+ * Absent until status reports one, and while a share or join still runs the band shows it dim, without
+ * offering it.
  */
 function statusLink(): string | undefined {
   if (!feed.session) return
@@ -1002,9 +1097,84 @@ function settleFailure($: Runtime, reason: string) {
 }
 
 /** Sync diagnostics can exceed process.run's 4 MiB stdout capture limit, so status streams with a bound. */
-async function readThreadStatus($: Runtime, thread: string, session: string, signal = new AbortController().signal) {
+async function readThreadStatus(
+  $: Runtime, thread: string, session: string, signal = new AbortController().signal,
+) {
   return parseThreadStatus(await readCommand($, ['thread', 'status', thread,
     '--source', 'claude-code', '--external-id', session], 'thread status', signal))
+}
+
+/**
+ * The thread facts a status read carries into the binding: its link, its audience, and Delta's
+ * background upload. A URL alone says nothing about who can see the thread, so they stay separate.
+ */
+function statusFields(status: ThreadStatus): Pick<Binding, 'url' | 'visibility' | 'upload' | 'uploaded'> {
+  const url = status.url ?? undefined
+  const upload = status.upload ?? undefined
+  return {
+    url,
+    visibility: status.visibility ?? undefined,
+    upload,
+    // A URL appears when Delta registers the thread, a moment before it confirms the content. The
+    // milestone outlives this read, so a later per-turn sync does not reopen the first upload.
+    ...url && upload?.state === 'uploaded' ? { uploaded: true as const } : {},
+  }
+}
+
+/** Save what a status read says about the thread's link, audience, and upload, and redraw the band. */
+async function rememberStatus($: Runtime, session: string, status: ThreadStatus) {
+  if (active !== session) return
+  let published = false
+  await serial(async () => {
+    const current = await load($, session)
+    if (active !== session || !current.thread) return
+    const next = { ...current, ...statusFields(status) }
+    published = !!current.autoUpload && !current.uploaded && !!next.uploaded
+    await save($, next)
+  })
+  // The first upload ends the way a share does, unless a share or join is drawing its own steps.
+  if (published && feed.session === session && !feed.progress && !sharing && !joining)
+    finishProgress($, 'Uploaded to Delta', 'done')
+  else {
+    syncSpinner($)
+    $.ui.invalidate('ui.render')
+  }
+  followUpload($, session)
+}
+
+/**
+ * Whether nothing more is expected from Delta's background upload. A session this plugin activated
+ * requests the upload and returns before Delta registers the thread, so its link only appears in a
+ * later status read; every other session has its link from the share or join that bound it.
+ */
+function uploadSettled(binding: Binding | undefined): boolean {
+  return !binding?.autoUpload || !!binding.uploaded
+}
+
+/**
+ * Keep reading status, on a backoff, until Delta has registered and confirmed an automatic
+ * session's thread, so the band shows its link and audience without waiting for the next delivery.
+ * Delta keeps retrying the upload itself; this only observes it.
+ */
+function followUpload($: Runtime, session: string) {
+  const state = sessions.get(session)
+  if (!state || active !== session) return
+  if (uploadSettled(state.binding)) {
+    state.uploadRefreshAttempts = 0
+    return
+  }
+  if (state.uploadRefresh) return
+  const attempt = state.uploadRefreshAttempts ?? 0
+  state.uploadRefreshAttempts = attempt + 1
+  state.uploadRefresh = $.clock.after(reconnectDelay(attempt), () => {
+    state.uploadRefresh = undefined
+    const binding = state.binding
+    if (active !== session || !binding?.thread) return
+    void readThreadStatus($, binding.locator ?? binding.thread, session)
+      .then((status) => rememberStatus($, session, status))
+      // An unanswered read says nothing about the upload; ask again after the next delay.
+      .catch(() => followUpload($, session))
+  })
 }
 
 async function resolveCli($: Runtime, allowInstall = false) {
@@ -1090,7 +1260,7 @@ function isPaused(state: SessionState) {
 
 function pauseNotice(state: SessionState) {
   return [...state.pauses.values()].find((notice) => notice !== undefined)
-    ?? `checkout sharing is paused; run ${recoveryCommand(state.binding)} to recover`
+    ?? `checkout sharing is paused; ${recoveryAdvice(state.binding)}`
 }
 
 function rememberToolResults(state: SessionState, message: ApiMessage) {
@@ -1149,6 +1319,30 @@ function ledgerKey(session: string) { return `appended:${session}` }
 function recoveryCommand(binding?: Binding) {
   const locator = binding?.joinTransition?.locator ?? (binding?.joined ? binding.locator ?? binding.thread : undefined)
   return locator ? `/delta join ${locator}` : '/delta share'
+}
+
+/**
+ * What to tell a person to do next when Delta is not ready. A session this plugin created itself
+ * recovers on its own, so its advice never names `/delta share`, which stays the explicit publish
+ * action for a manual session.
+ */
+function recoveryAdvice(binding?: Binding): string {
+  return binding?.autoUpload ? 'automatic recording retries on your next prompt' : `run ${recoveryCommand(binding)}`
+}
+
+/** Automatic activation has not finished: the binding exposes its thread only once every step succeeded. */
+function activationIncomplete(runtime: SessionState): boolean {
+  return !!runtime.binding?.autoUpload && !runtime.binding.thread
+}
+
+/**
+ * A prompt or a resume is an automatic session's repair path: re-run whatever activation steps are
+ * missing, using the upload the session already recorded. Every step is idempotent, so this is safe.
+ */
+function retryAutomaticActivation($: Runtime, session: string, runtime: SessionState) {
+  const binding = runtime.binding
+  if (binding?.autoUpload && !binding.thread && binding.checkout)
+    void activateAutomatically($, session, binding.checkout, binding.autoUpload).catch(() => {})
 }
 
 async function save($: Runtime, value: Binding, isCurrent = () => true) {
@@ -1265,13 +1459,13 @@ async function cleanupOutbox($: Runtime, session: string) {
   }
 }
 
-async function command($: Runtime, args: string[], name: string, check?: () => Promise<void>) {
+async function command($: Runtime, args: string[], name: string, check?: () => Promise<void>, timeoutMs = 120_000) {
   let result: Awaited<ReturnType<Runtime['process']['run']>>
   try {
     const executable = await resolveCli($)
     if (check) await check()
     result = await $.process.run([executable, '--json', ...args], {
-      timeoutMs: 120_000, env: { DELTA_CLI_INTEGRATION: 'claude_code' },
+      timeoutMs, env: { DELTA_CLI_INTEGRATION: 'claude_code' },
     })
   } catch (error) {
     throw new Error(`${name}: cannot run Delta CLI (${String(error)}). Install the matching new Delta CLI and app, and put delta on PATH.`)
@@ -1338,6 +1532,7 @@ async function verifyCheckout($: Runtime, binding: Binding) {
     resumeCheckout(runtime, 'verification')
     runtime.joinFailure = undefined
   }
+  await rememberStatus($, binding.session, status)
   return status
 }
 
@@ -1348,10 +1543,13 @@ async function drainPending($: Runtime, session: string): Promise<boolean> {
       if (!binding.thread || !binding.pending.length) return true
       try { await verifyCheckout($, binding) }
       catch (error) {
-        // An unanswered check says nothing about the checkout; drain decides how long to keep asking.
+        // An unanswered check says nothing about the checkout. A session that records offline still
+        // delivers, acknowledged locally, and checks the checkout again once the server answers;
+        // any other session waits, and drain decides how long to keep asking.
         const state = sessions.get(session)
-        if (state && classifyCommandFailure(error) === 'permanent') pauseCheckout(state, 'verification')
-        throw error
+        const permanent = classifyCommandFailure(error) === 'permanent'
+        if (state && permanent) pauseCheckout(state, 'verification')
+        if (permanent || !recordsOffline(session, binding)) throw error
       }
       // Keep stdout well below process.run's 4 MiB capture limit.
       const batch: Entry[] = []
@@ -1367,7 +1565,8 @@ async function drainPending($: Runtime, session: string): Promise<boolean> {
         if (collected.bytes >= 2_000_000) break
       }
       const argv = [await resolveCli($), '--json', 'thread', 'append', binding.locator ?? binding.thread,
-        '--source', 'claude-code', '--external-id', session]
+        '--source', 'claude-code', '--external-id', session,
+        ...recordsOffline(session, binding) ? ['--acknowledge', 'local'] : []]
       let result: Awaited<ReturnType<Runtime['process']['run']>>
       try {
         result = await $.process.run(argv, {
@@ -1596,11 +1795,15 @@ async function failDelivery($: Runtime, session: string, error: unknown): Promis
   if (!state || active !== session) throw new DeltaSendError(error.message, false)
   const decision = deliveryFailure(state, error, state.pauses.has('verification'))
   const { retry: willRetry } = decision
-  const verification = decision.pause === 'verification'
   Object.assign(state, decision.state)
   const failure = new DeltaSendError(error.message, willRetry)
-  const pausedText = `Delta sharing paused: ${failure.message}. The message stays queued. ${permanentFailureAdvice(error.code)}, then ${verification
-    ? `submit a prompt or run ${recoveryCommand(state.binding)}` : `run ${recoveryCommand(state.binding)}`} to try again.`
+  // The server refused this thread's recorded changes; an offline session keeps its records queued
+  // and the band offers the person Fork & Restore or Discard instead of advice to repair a cause.
+  const refused = error.code === 'reload_required' && recordsOffline(session, state.binding)
+  if (refused) state.refusedOffline = true
+  const pausedText = refused
+    ? "Delta couldn't publish this thread's offline changes."
+    : `Delta sharing paused: ${failure.message}. The message stays queued. ${permanentFailureAdvice(error.code, !!state.binding?.autoUpload, error.reason)}, then ${recoveryAdvice(state.binding)}.`
   if (!willRetry) {
     pauseCheckout(state, decision.pause, pausedText)
   } else scheduleSendRetry($, session, error.hints.retryAfterMs)
@@ -1619,6 +1822,7 @@ function endDeliveryFailures(state: SessionState) {
   state.retryAttempts = 0
   state.deliveryNotice = undefined
   state.retryReason = undefined
+  state.refusedOffline = false
   state.retryTimer?.cancel()
   state.retryTimer = undefined
 }
@@ -1736,7 +1940,7 @@ async function readFrom($: Runtime, path: string, offset: number, onText: (text:
 async function report($: Runtime, error: unknown) {
   // A delivery failure was already shown, with its retry or pause, where it was classified.
   if (error instanceof DeltaSendError) return
-  const text = `Delta sharing paused: ${String(error)}. Run ${recoveryCommand(sessions.get(active)?.binding)} to retry.`
+  const text = `Delta sharing paused: ${String(error)}. ${recoveryAdvice(sessions.get(active)?.binding)}.`
   await $.ui.status(text)
   await $.ui.log(text)
 }
@@ -1807,7 +2011,7 @@ async function flushUnsaved($: Runtime, session: string) {
 async function checkoutRoot($: Runtime): Promise<string> {
   const result = await $.process.run(['git', 'rev-parse', '--show-toplevel'], { cwd: await $.session.cwd() })
   if (result.exitCode !== 0 || result.isStdoutTruncated)
-    throw new Error('current directory is not inside a Git checkout; open a checkout before sharing')
+    throw new Error('current directory is not inside a Git checkout; open a checkout first')
   return result.stdout.trim()
 }
 
@@ -1911,7 +2115,8 @@ async function share($: Runtime, request: ShareRequest): Promise<string> {
   await stopConversation()
   await assertShareSession($, request)
   // Only now that the watcher is stopped is its pause true; the restarted watch lifts it once live.
-  pauseCheckout(runtime, 'watcher')
+  // A session that records offline does not wait for the watcher and takes no such pause.
+  if (!recordsOffline(session, binding)) pauseCheckout(runtime, 'watcher')
   setProgress($, 'Attaching the checkout…', 'active', [3, 5])
   const attached = await command($, ['worktree', 'attach', root, '--thread', binding.thread!], 'worktree attach', check)
   validateAttachmentReceipt(attached, root)
@@ -2155,7 +2360,7 @@ async function completeJoin($: Runtime, session: string, plan: JoinPlan, request
   }
   const status = await verifyCheckout($, binding)
   await check()
-  binding.url = status.url ?? undefined
+  Object.assign(binding, statusFields(status))
   await serial(async () => {
     await check()
     await save($, binding, () => !request.cancelled)
@@ -2530,8 +2735,15 @@ async function activate($: Runtime, session: string, isCurrent = () => true) {
     if (active !== session) await stopConversation()
     if (!ownsActivation()) return
     active = session
-    const binding = await serial(() => load($, session))
+    let binding = await serial(() => load($, session))
     if (!ownsActivation()) return
+    // A session that resumes is live again: drop the end marker so bounded cleanup never removes it.
+    if (binding.endedAt !== undefined) {
+      const live = { ...binding }
+      delete live.endedAt
+      await serial(() => save($, live))
+      binding = live
+    }
     const runtime = stateFor(session)
     runtime.binding = binding
     runtime.captureFailure ??= binding.captureFailure
@@ -2550,6 +2762,15 @@ async function activate($: Runtime, session: string, isCurrent = () => true) {
     }
     endDeliveryFailures(runtime)
     scheduleOutboxCleanup($, binding)
+    // Bounded store retention: entries for sessions that ended long ago are pruned only when they
+    // hold nothing a later session would need. It never blocks activation.
+    void pruneStore($).catch(() => {})
+    // An automatic session whose activation never finished, for example because Delta was unreachable
+    // when it started, resumes that activation rather than waiting for a thread it does not have yet.
+    if (activationIncomplete(runtime)) {
+      retryAutomaticActivation($, session, runtime)
+      return
+    }
     if (binding.snapshot && boundDirectory(binding)) {
       pauseCheckout(runtime, 'watcher')
       try { await requireContract($, session) }
@@ -2568,8 +2789,18 @@ async function activate($: Runtime, session: string, isCurrent = () => true) {
         beginRestore($, session)
         return
       }
-      try { await startParticipation($, session, binding, ownsActivation) }
-      catch (error) { if (ownsActivation()) await report($, error) }
+      if (recordsOffline(session, binding)) {
+        // Offline recording does not wait for the watcher: start it in the background and let a
+        // prompt or the outbox proceed meanwhile.
+        resumeCheckout(runtime, 'watcher')
+        void startConversation($, session).catch((error) => { if (ownsActivation()) void report($, error) })
+      } else {
+        try { await startParticipation($, session, binding, ownsActivation) }
+        catch (error) { if (ownsActivation()) await report($, error) }
+      }
+      // An automatic session follows Delta's background upload on its own timer, so the link appears
+      // even when the watcher never becomes ready.
+      if (ownsActivation() && binding.autoUpload) followUpload($, session)
       if (ownsActivation() && !isPaused(runtime)) await recoverExecution($, session)
     }
     if (ownsActivation() && !runtime.captureFailure && binding.thread && binding.pending.length)
@@ -2577,6 +2808,445 @@ async function activate($: Runtime, session: string, isCurrent = () => true) {
   } finally {
     if (epoch === sessionEpoch) activatingSession = ''
   }
+}
+
+/**
+ * Organization id → name, filled by every organization list read, so the band can name the
+ * organization a thread is shared with. The band itself reads the list at most once per process.
+ */
+const organizationNames = new Map<string, string>()
+let currentOrganizationId: string | undefined
+let organizationDirectory: Promise<void> | undefined
+
+/** The account's organizations from `delta --json org list`, remembering their names for the band. */
+async function listOrganizations($: Runtime, timeoutMs?: number): Promise<Organization[]> {
+  const organizations = organizationsFrom(await command($, ['org', 'list'], 'org list', undefined, timeoutMs))
+  for (const organization of organizations) organizationNames.set(organization.id, organization.name)
+  currentOrganizationId = (organizations.find((organization) => organization.current) ?? organizations[0])?.id
+  return organizations
+}
+
+function loadOrganizationDirectory($: Runtime): Promise<void> {
+  organizationDirectory ??= listOrganizations($).then(() => undefined, () => undefined)
+  return organizationDirectory
+}
+
+/** The name of an organization, or of the current one when the caller names none. */
+function organizationName(id: string | undefined): string | undefined {
+  return organizationNames.get(id ?? currentOrganizationId ?? '')
+}
+
+/** The host bindings the setup wizard and onboarding run against. */
+function setupEnv($: Runtime): SetupEnv {
+  return {
+    checkoutRoot: () => checkoutRoot($),
+    // Linked worktrees share the common directory, so they share one onboarding marker. Git before
+    // 2.31 has no `--path-format`, so the directory is resolved against the checkout root instead.
+    gitCommonDir: async () => {
+      try {
+        const root = await checkoutRoot($)
+        const result = await $.process.run(['git', 'rev-parse', '--git-common-dir'], { cwd: root })
+        if (result.exitCode !== 0 || result.isStdoutTruncated) return undefined
+        const lines = result.stdout.trim().split('\n')
+        if (lines.length !== 1 || !lines[0]) return undefined
+        return /^(?:\/|[A-Za-z]:[\\/]|\\\\)/.test(lines[0]) ? lines[0] : `${root}/${lines[0]}`
+      } catch { return undefined }
+    },
+    contract: () => readThreadContract($),
+    organizations: () => listOrganizations($),
+    readFile: async (path) => await $.fs.exists(path) ? await $.fs.read(path) : undefined,
+    writeFile: (path, text) => $.fs.write(path, text) as Promise<void>,
+    // A joined thread is someone else's shared thread; an organization or unlisted one is already
+    // visible beyond this account.
+    sessionShared: async () => {
+      const binding = stateFor(await $.session.id()).binding
+      return !!binding?.joined || (!!binding?.visibility && binding.visibility !== 'private')
+    },
+    shareSession: async () => beginShare($, await $.session.id()),
+  }
+}
+
+/** The interactive surface the wizard speaks through: `$.ui.ask`, when this Claude build has it. */
+function claudeInteraction($: Runtime): Interaction {
+  return {
+    async ask(question, options) {
+      let answer: unknown
+      try { answer = await $.ui.ask(question, options as never) }
+      catch (error) {
+        // A missing method is a build without the question API; a dismissed dialog rejects too.
+        if (error instanceof TypeError) throw new InteractionUnavailable(String(error))
+        throw new InteractionDismissed(String(error))
+      }
+      if (answer === undefined || answer === null || answer === '') throw new InteractionDismissed('dismissed')
+      if (typeof answer === 'string') return answer
+      const wrapped = answer as { label?: string; value?: string }
+      return wrapped.label ?? wrapped.value ?? ''
+    },
+    log: async (text, to) => { await $.ui.log(text, to ? { to } : undefined) },
+  }
+}
+
+/** Log a notice to the transcript at most once per process. */
+const noticesShown = new Set<string>()
+async function notifyOnce($: Runtime, text: string) {
+  if (noticesShown.has(text)) return
+  noticesShown.add(text)
+  await $.ui.log(text, { to: 'transcript' })
+}
+
+/** The source `classic.SessionStart` reported for each session, until the session ends. */
+const sessionSources = new Map<string, string>()
+
+function newSessionFor(session: string): boolean {
+  const source = sessionSources.get(session)
+  return source === 'startup' || source === 'clear'
+}
+
+/**
+ * A new session's capture boundary: row capture, `prompt.submit`, and `turn.start` wait on this until
+ * the policy and contract decision is made. Before the decision the session holds no snapshot, so
+ * activity let through early would be dropped; the promise resolves for every outcome, including a
+ * refusal, and the contract check that bounds it is itself bounded by `CONTRACT_TIMEOUT_MS`.
+ */
+type CaptureDecision = { promise: Promise<void>; resolve: () => void }
+const captureDecisions = new Map<string, CaptureDecision>()
+
+/** Open the capture boundary for a session that is about to decide whether it records automatically. */
+function beginCaptureDecision(session: string) {
+  if (captureDecisions.has(session)) return
+  let resolve!: () => void
+  const promise = new Promise<void>((yes) => { resolve = yes })
+  captureDecisions.set(session, { promise, resolve })
+}
+
+/** Resolve the boundary once made, whatever the outcome; a second call is harmless. */
+function decideCapture(session: string) {
+  captureDecisions.get(session)?.resolve()
+  captureDecisions.delete(session)
+}
+
+/** Hold new-session activity until its capture boundary exists, or nothing when there is none. */
+async function captureDecided(session: string): Promise<void> {
+  await captureDecisions.get(session)?.promise
+}
+
+/**
+ * Read a checkout's policy at a session's start: show a policy problem once, auto-activate a new
+ * session when the policy records automatically, and offer setup when nothing configures the repo.
+ * Everything here runs off the startup hook's critical path.
+ */
+async function startSession($: Runtime, session: string) {
+  const env = setupEnv($)
+  const newSession = newSessionFor(session)
+  let root: string
+  let policy: ProjectPolicy
+  try {
+    try { root = await checkoutRoot($) }
+    // Outside a checkout there is nothing to record or offer.
+    catch { return }
+    const path = policyPath(root)
+    try { policy = readProjectPolicy(await env.readFile(path)).policy }
+    catch (error) {
+      await notifyOnce($, `Delta settings at ${path} could not be read (${String(error)}); this checkout records manually until it is fixed.`)
+      return
+    }
+    if (policy.problem)
+      await notifyOnce($, `Delta settings at ${path} could not be used (${policy.problem}); this checkout records manually until it is fixed. Run /delta setup to replace the file.`)
+    if (newSession && recordsAutomatically(policy))
+      await activateAutomatically($, session, root, { mode: policy.mode === 'private' ? 'private' : 'organization', organization: policy.organization! })
+  } finally {
+    // Nothing below records, so the session's activity never waits on the setup offer's dialog.
+    decideCapture(session)
+  }
+  // Headless sessions are never offered setup; only an interactive surface can show the dialog.
+  if (!hasInteractiveSurface(await $.session.surfaces())) return
+  await offerOnboarding(env, claudeInteraction($), {
+    get: (key) => $.store.get(key) as Promise<unknown>,
+    set: (key, value) => $.store.set(key, value).then(() => undefined),
+  }, {
+    root, configured: policy.configured, newSession, joined: !!stateFor(session).binding?.joined, joining: !!joining,
+  })
+}
+
+/** Auto-activations already running in this process, so a repeated startup hook cannot create twice. */
+const autoActivating = new Map<string, Promise<void>>()
+
+/**
+ * Create the thread a repository's policy asks for, request its upload intent, attach the checkout,
+ * and start recording. Nothing drains or verifies the checkout until create, upload, and attach have
+ * all succeeded: only then is the binding's thread and checkout made visible, so a row or prompt that
+ * arrives mid-activation sees a session that is still simply local. Creation is idempotent by
+ * external id, so an interrupted activation is safely re-run — from the next prompt, or a startup.
+ *
+ * The session's capture boundary is released once the contract gate and snapshot are settled, before
+ * any network step, so a prompt or turn that arrives during create or attach is recorded
+ * rather than dropped. Every await re-checks ownership: a session that ended, or that switched away
+ * while a step was pending, leaves no half-initialized binding behind.
+ */
+function activateAutomatically($: Runtime, session: string, root: string, upload: AutoUpload): Promise<void> {
+  const running = autoActivating.get(session)
+  if (running) return running
+  const epoch = sessionEpoch
+  const ownsActivation = () => epoch === sessionEpoch && active === session
+  const task = (async () => {
+    const runtime = stateFor(session)
+    if (active !== session || joining) return
+    const existing = await serial(() => load($, session))
+    if (!ownsActivation()) return
+    // A session that already holds a thread, or a binding that is not ours, is never re-created.
+    if (existing.thread || (existing.snapshot && !existing.autoUpload) || existing.joined || existing.joinTransition) return
+    // A fresh session checks the account against the policy alongside the contract, so a repository
+    // this account cannot record to is reported before anything is staged.
+    const misconfiguration = existing.snapshot ? undefined : policyMisconfiguration($, upload.organization)
+    try {
+      // Refuse a CLI that cannot record offline before persisting anything, so an incompatible build
+      // leaves the session manual rather than holding a half-initialized automatic binding.
+      await requireContract($, session)
+      if (!ownsActivation()) return
+      const version = contractVerified.get(session) ?? PLUGIN_CONTRACT_VERSION
+      if (version < OFFLINE_CONTRACT_VERSION) {
+        // Auto mode cannot record without a CLI that speaks the offline contract; say so once.
+        await notifyOnce($, `Delta must be updated for automatic uploads: this CLI speaks recording contract ${version}, and automatic recording needs ${OFFLINE_CONTRACT_VERSION}. This checkout keeps recording manually until Delta is updated.`)
+        return
+      }
+      const refusal = await misconfiguration
+      if (!ownsActivation()) return
+      if (refusal) {
+        await stopAutomaticRecording($, session, root, refusal)
+        return
+      }
+      // The session is new, so its snapshot is already taken: no history is exported, and live capture
+      // starts with the first row. The intent is durable before any network, so a session whose server
+      // is briefly unavailable retries from the next prompt. No thread or checkout is published yet,
+      // so nothing drains against a checkout that is not attached or a thread that is not uploaded.
+      if (!existing.snapshot) {
+        const staged: Binding = { session, snapshot: true, next: 1, pending: [], checkout: root, autoUpload: upload }
+        await serial(() => save($, staged))
+        runtime.binding = staged
+      }
+      if (!ownsActivation()) return
+      // The snapshot exists now, so new-session activity may pass; the network steps stay asynchronous.
+      decideCapture(session)
+      setProgress($, 'Connecting this session to Delta…', 'active')
+      const created = await command($, ['thread', 'create', '--source', 'claude-code', '--external-id', session,
+        '--organization', upload.organization, '--visibility', upload.mode], 'thread create')
+      if (!ownsActivation()) return
+      validateCreationReceipt(created)
+      const attached = await command($, ['worktree', 'attach', root, '--thread', created.thread_id], 'worktree attach')
+      if (!ownsActivation()) return
+      validateAttachmentReceipt(attached, root)
+      // Every step succeeded: now the thread and checkout become visible to drain and verification.
+      await serial(async () => save($, {
+        ...await load($, session), thread: created.thread_id, checkout: root, checkoutReference: attached.reference,
+      }))
+      if (!ownsActivation()) return
+      runtime.binding = await serial(() => load($, session))
+      void startConversation($, session).catch((error) => { if (ownsActivation()) void report($, error) })
+      void drain($, session).catch((error) => { if (ownsActivation()) void report($, error) })
+      // The band now follows Delta's background upload until Delta confirms it, whether or not the
+      // watcher becomes ready: a status read is what reports the thread's link.
+      clearProgress($)
+      followUpload($, session)
+    } catch (error) {
+      if (!ownsActivation()) return
+      // Retrying cannot change a permanent answer, so the session stops recording instead of queuing
+      // records that would never be sent.
+      if (classifyCommandFailure(error) === 'permanent') {
+        await stopAutomaticRecording($, session, root, activationRefusal(error, upload.organization))
+        return
+      }
+      // Only a staged session gets this far: everything before staging fails permanently.
+      const text = `Delta couldn't start automatic recording: ${String(error)}. Records stay queued and Delta retries on your next prompt.`
+      setProgress($, text, 'error')
+      await notifyOnce($, text)
+    }
+  })()
+  autoActivating.set(session, task)
+  void task.finally(() => { if (autoActivating.get(session) === task) autoActivating.delete(session) })
+  return task
+}
+
+/** What the band and the transcript say when a repository's policy cannot record this session. */
+type ActivationRefusal = { band: string; transcript: string }
+
+const SIGNED_OUT_REFUSAL: ActivationRefusal = {
+  band: 'Not recording: sign in with `delta auth login`',
+  transcript: "This repository records Claude Code sessions automatically, but Delta is signed out, so this session isn't recorded. Sign in with `delta auth login`; new sessions then record automatically.",
+}
+
+function notMemberRefusal(organization: string): ActivationRefusal {
+  const name = organizationName(organization)
+  return {
+    band: "Not recording: your Delta account isn't in this repo's organization · /delta share",
+    transcript: `This repository's Delta settings record sessions to ${name ? `${name} (${organization})` : organization}, which your Delta account isn't a member of, so this session isn't recorded. Use /delta share to share it with your own organization, ask to be added to ${name ?? 'that organization'}, or run /delta setup if the settings name the wrong organization.`,
+  }
+}
+
+/**
+ * Check the signed-in account against the organization a policy records to. Only a definite answer
+ * refuses: an empty or unreadable list (Delta not running, memberships not loaded yet) lets
+ * activation proceed, and `thread create` checks membership again.
+ */
+async function policyMisconfiguration($: Runtime, organization: string): Promise<ActivationRefusal | undefined> {
+  try {
+    // Bounded like the contract check it runs beside, since new-session activity waits on both.
+    const organizations = await listOrganizations($, CONTRACT_TIMEOUT_MS)
+    if (organizations.length && !organizations.some((known) => known.id === organization))
+      return notMemberRefusal(organization)
+  } catch (error) {
+    if (error instanceof DeltaCommandError && error.code === 'authentication_required') return SIGNED_OUT_REFUSAL
+  }
+}
+
+/** Describe a permanent activation failure, recognizing the account problems a person can fix. */
+function activationRefusal(error: unknown, organization: string): ActivationRefusal {
+  if (error instanceof DeltaCommandError && error.reason === 'organization_not_member') return notMemberRefusal(organization)
+  if (error instanceof DeltaCommandError && error.code === 'authentication_required') return SIGNED_OUT_REFUSAL
+  const advice = error instanceof DeltaCommandError
+    ? permanentFailureAdvice(error.code, true, error.reason) : 'Fix the cause, then start a new session'
+  return {
+    band: `Not recording: ${advice}`,
+    transcript: `Delta couldn't start automatic recording: ${error instanceof Error ? error.message : String(error)}. This session isn't recorded. ${advice}.`,
+  }
+}
+
+/**
+ * End automatic recording for a session the policy cannot record: drop any staged binding and its
+ * outbox, so the session is simply manual again and nothing retries or grows, then report why. A
+ * later /delta share exports the whole conversation from Claude's transcript, so nothing is lost.
+ *
+ * The band shows the refusal for the whole session. The transcript explains it once per repository
+ * and refusal, remembered in the store, so every new session in a misconfigured repository stays quiet.
+ */
+async function stopAutomaticRecording($: Runtime, session: string, root: string, refusal: ActivationRefusal) {
+  await serial(async () => {
+    const binding = await load($, session)
+    if (!binding.autoUpload || binding.thread) return
+    await $.store.delete(key(session))
+    const runtime = stateFor(session)
+    runtime.binding = await load($, session)
+    runtime.cleanedThrough = undefined
+    // Inside `serial`, so a share that starts next cannot stage a record this removal deletes. The
+    // outbox is only disk, so a failed removal leaves orphans, never a wrong binding.
+    try { await collectAcknowledgedOutbox($, { session, root: outbox, next: binding.next, pending: [] }) }
+    catch (error) {
+      try { await $.ui.log(`Delta outbox removal after stopping automatic recording failed: ${String(error)}`, { to: 'debug' }) }
+      catch {}
+    }
+  })
+  finishProgress($, refusal.band, 'error')
+  const marker = `auto-refused:${await setupEnv($).gitCommonDir() ?? root}`
+  try {
+    if (await $.store.get(marker) === refusal.transcript) return
+    await $.store.set(marker, refusal.transcript)
+  } catch { /* an unreadable marker only repeats the explanation */ }
+  await $.ui.log(refusal.transcript, { to: 'transcript' })
+}
+
+/** How long after a session really ends its store entries may be removed; resuming into them dies past it. */
+const STORE_HORIZON_MS = 30 * 24 * 60 * 60 * 1000
+
+/**
+ * Remove the store entries (`session:` binding and `appended:` ledger) of sessions that really ended
+ * before the horizon and hold nothing a later session would need. A binding without an end marker may
+ * be live in another Claude process, so it is never removed, and neither is any session in use here.
+ *
+ * The store is shared by every Claude process and has no transactions, so each session is read,
+ * checked, and deleted in turn: a resume elsewhere can only be lost in that one read-to-delete window.
+ */
+async function pruneStore($: Runtime) {
+  // A Claude build without `$.store.keys` cannot enumerate the store, so retention is skipped there.
+  let keys: string[]
+  try { keys = await $.store.keys() } catch { return }
+  const now = await $.clock.now()
+  const ids = new Set(keys.flatMap((storeKey) => /^(?:session|appended):(.+)$/.exec(storeKey)?.[1] ?? []))
+  for (const id of ids) {
+    if (sessions.has(id)) continue
+    const binding = await $.store.get(key(id)) as Binding | undefined
+    if (typeof binding?.endedAt !== 'number' || binding.endedAt > now - STORE_HORIZON_MS ||
+        binding.pending?.length || binding.captureFailure || binding.joinTransition) continue
+    await $.store.delete(key(id))
+    await $.store.delete(ledgerKey(id))
+  }
+}
+
+/** Begin the same publication flow `/delta share` runs, for the band's share control. */
+function beginShare($: Runtime, session: string): boolean {
+  if (sharing || stateFor(session).currentTurnId) return false
+  const request: ShareRequest = { session, cwd: '' }
+  sharing = request
+  setProgress($, 'Preparing to share…', 'active', [1, 5])
+  $.clock.after(0, async () => {
+    request.cwd = await $.session.cwd()
+    await runShare($, request)
+  })
+  return true
+}
+
+/**
+ * Begin the person's choice for a refused offline thread, from the band's controls. The command runs
+ * off the hook, and its result clears the refusal so the queued records can drain.
+ */
+function beginRefusalResolution($: Runtime, session: string, kind: 'fork' | 'discard'): boolean {
+  if (resolving || !stateFor(session).refusedOffline) return false
+  resolving = true
+  $.clock.after(0, async () => {
+    try { await resolveRefusal($, session, kind) }
+    catch (error) { await reportRefusal($, session, error) }
+    finally { resolving = false }
+  })
+  return true
+}
+
+/**
+ * Run the person's choice for the local changes Delta refused: **Fork & Restore** forks them into a
+ * kept thread and then discards them from the original, while **Discard** discards them outright.
+ * Either way the original is the server's view again when it finishes, a fork is named once, and the
+ * queued records drain into the original.
+ */
+async function resolveRefusal($: Runtime, session: string, kind: 'fork' | 'discard'): Promise<void> {
+  const state = sessions.get(session)
+  if (!state || active !== session) return
+  const thread = (await serial(() => load($, session))).thread
+  if (!thread) return
+  // Fork first: it copies the refused changes into a kept thread, and the discard then resets the original.
+  const forked = kind === 'fork' ? parseThreadFork((await runRefusalCommand($, 'fork', thread)).stdout) : undefined
+  checkResult(await runRefusalCommand($, 'discard', thread), 'thread discard')
+  endDeliveryFailures(state)
+  resumeCheckout(state, 'delivery')
+  $.ui.invalidate('ui.render')
+  if (forked)
+    await notifyOnce($, `Delta kept this thread's offline changes in the new thread "${forked.thread_id}"; this thread carries on without them.`)
+  await $.ui.log(kind === 'fork' ? "Delta forked this thread's offline changes into a kept thread." : "Delta discarded this thread's offline changes.", { to: 'debug' })
+  void drain($, session).catch((error) => report($, error))
+}
+
+/** Run one `thread fork` or `thread discard` for a refused thread, failing with a typed error on a broken run. */
+async function runRefusalCommand($: Runtime, kind: 'fork' | 'discard', thread: string): Promise<Awaited<ReturnType<Runtime['process']['run']>>> {
+  const args = kind === 'fork' ? ['thread', 'fork', thread] : ['thread', 'discard', thread, '--force']
+  let result: Awaited<ReturnType<Runtime['process']['run']>>
+  try {
+    result = await $.process.run([await resolveCli($), '--json', ...args], { timeoutMs: 120_000 })
+  } catch (error) { throw new DeltaCommandError('process_failed', `thread ${kind} did not finish (${String(error)})`) }
+  if (result.isStdoutTruncated || result.isStderrTruncated)
+    throw new DeltaCommandError('command_failed', `thread ${kind} output was truncated`)
+  return result
+}
+
+/** Show why the person's Fork & Restore or Discard did not resolve the refusal; the controls stay available. */
+async function reportRefusal($: Runtime, session: string, error: unknown) {
+  const state = sessions.get(session)
+  if (!state || active !== session) return
+  await $.ui.log(`Delta could not resolve this thread's offline changes: ${String(error)}. The records stay queued.`, { to: 'transcript' })
+  try { $.ui.invalidate('ui.render') } catch {}
+}
+
+/** Run `/delta setup` for the active session and answer with what it did. */
+async function setupCommand($: Runtime): Promise<string> {
+  if (!hasInteractiveSurface(await $.session.surfaces())) return HEADLESS_REFUSAL
+  const outcome = await runSetupWizard(setupEnv($), claudeInteraction($))
+  if (outcome.status === 'wrote') $.ui.invalidate('ui.render')
+  return outcome.text
 }
 
 export function register(on: On) {
@@ -2600,6 +3270,9 @@ export function register(on: On) {
     const session = await $.session.id()
     const runtime = stateFor(session)
     if (runtime.joinFailure) return { drop: `${runtime.joinFailure} The prompt was not submitted.` }
+    // A new session's prompt waits for its capture boundary, so a prompt typed right after `/clear` or
+    // sent headlessly is recorded rather than lost before the snapshot exists.
+    await captureDecided(session)
     // A hot reload can install this hook without replaying session.start.
     if (active !== session || !runtime.binding) {
       try { await activate($, session) }
@@ -2618,12 +3291,24 @@ export function register(on: On) {
     if (blocked === 'moving')
       return { drop: "Delta is moving Claude to the thread folder between turns. Try again in a moment. The prompt was not submitted." }
     if (!runtime.binding?.snapshot) return next(e)
-    // Watching again cannot lift a refusal, so do not restart the watcher for one.
-    if (runtime.pauses.has('delivery'))
+    // A session that records offline does not wait for the watcher and never drops a prompt for a
+    // delivery pause: the pause stops delivery, and this prompt retries delivery and any incomplete
+    // automatic activation once. A poison record simply stays queued, its notice shown once.
+    const offline = recordsOffline(session, runtime.binding)
+    // An unfinished automatic activation records locally and retries from here, whether or not the
+    // CLI has answered its contract yet; there is no thread to watch or verify until it completes.
+    const incomplete = activationIncomplete(runtime)
+    if (offline || incomplete) {
+      if (runtime.pauses.has('delivery')) resumeCheckout(runtime, 'delivery')
+      retryAutomaticActivation($, session, runtime)
+    } else if (runtime.pauses.has('delivery')) {
+      // Watching again cannot lift a refusal, so do not restart the watcher for one.
       return { drop: `${runtime.pauses.get('delivery') ?? pauseNotice(runtime)} The prompt was not submitted.` }
-    if (!runtime.binding.thread || isPaused(runtime) || feed.session !== session || feed.connection !== 'live') {
+    }
+    // A session that does not record offline still recovers the watcher here and refuses if it cannot.
+    if (!offline && !incomplete && (!runtime.binding.thread || isPaused(runtime) || feed.session !== session || feed.connection !== 'live')) {
       try { await startConversation($, session) }
-      catch (error) { return { drop: `The Delta watcher is not ready: ${String(error)}. Run ${recoveryCommand(runtime.binding)} to recover.` } }
+      catch (error) { return { drop: `The Delta watcher is not ready: ${String(error)}. ${recoveryAdvice(runtime.binding)}.` } }
     }
     if (e.turnId) {
       const execution = runtime.binding.execution
@@ -2633,14 +3318,22 @@ export function register(on: On) {
     }
     try {
       if (runtime.captureFailure || runtime.binding.captureFailure)
-        throw new Error(`local conversation capture is paused; run ${recoveryCommand(runtime.binding)} to recover before continuing`)
-      await verifyCheckout($, runtime.binding)
-      if (isPaused(runtime)) throw new Error(pauseNotice(runtime))
+        throw new Error(`local conversation capture is paused; ${recoveryAdvice(runtime.binding)} before continuing`)
+      // A prompt that arrives mid-activation records locally while create, upload, and attach finish.
+      if (!activationIncomplete(runtime)) {
+        await verifyCheckout($, runtime.binding)
+        if (isPaused(runtime)) throw new Error(pauseNotice(runtime))
+      }
     } catch (error) {
-      const text = `Delta is not ready for this prompt: ${String(error)}. The prompt was not submitted.`
-      // The band names a worktree or directory that is not ready, until a prompt finds it ready.
-      if (error instanceof JoinNotReadyError) pauseCheckout(runtime, 'verification', error.message)
-      return { drop: text }
+      // Offline, an unanswered checkout check says nothing about the checkout: the records stay
+      // queued and retry, so the prompt proceeds rather than being dropped. A non-retryable refusal
+      // or a local persistence failure still stops it.
+      if (!(offline && classifyCommandFailure(error) === 'transient' && !isPaused(runtime))) {
+        const text = `Delta is not ready for this prompt: ${String(error)}. The prompt was not submitted.`
+        // The band names a worktree or directory that is not ready, until a prompt finds it ready.
+        if (error instanceof JoinNotReadyError) pauseCheckout(runtime, 'verification', error.message)
+        return { drop: text }
+      }
     }
     // Remote activity that already completed precedes the prompt; later rows wait for its turn.
     // Like a native Delta send, the turn this prompt starts takes over any running remote turn.
@@ -2668,13 +3361,21 @@ export function register(on: On) {
     // bind `currentTurnId` or open an execution.
     if (e.agentId !== undefined) return next(e)
     const session = await $.session.id()
+    await captureDecided(session)
     const runtime = stateFor(session)
     runtime.currentTurnId = e.turnId
     if (runtime.localTurn && !runtime.localTurn.turnId) runtime.localTurn.turnId = e.turnId
     if (!runtime.binding?.snapshot || isLocalTurn(runtime, e.turnId)) return next(e)
     try {
       await beginExecution($, session, e.turnId)
-      if (isPaused(runtime) || runtime.captureFailure || feed.session !== session || feed.connection !== 'live')
+      // A session that records offline keeps its turn while the watcher is down, and a delivery pause
+      // stops delivery rather than Claude: observation and delivery are not required to record, and a
+      // transient refusal queues rather than stopping the turn. A verification pause still stops it.
+      const offline = recordsOffline(session, runtime.binding)
+      const blockingPause = offline ? runtime.pauses.has('verification') : isPaused(runtime)
+      const observationDown = !offline && !activationIncomplete(runtime) &&
+        (feed.session !== session || feed.connection !== 'live')
+      if (blockingPause || runtime.captureFailure || observationDown)
         await loseExecution($, session, runtime.nativeTurns.get(e.turnId)!, 'Delta observation or capture is unavailable')
       else void drain($, session).catch((error) => report($, error))
     } catch (error) {
@@ -2745,6 +3446,20 @@ export function register(on: On) {
     // as though the key worked from the prompt, where it only types.
     else if (href && copy) copier = <Button key="copy" plain dimColor autoFocus label={copy.label}
       onPress={(press) => { void copyLink($, href, press.surface).catch((error) => report($, error)) }} />
+    // A private thread offers the same publication `/delta share` runs; the band does not repeat it
+    // once the thread is shared with the organization.
+    const sharer = band.share ? <Button key="share" plain dimColor label={band.share.label}
+      onPress={() => { if (feed.session) beginShare($, feed.session) }} /> : null
+    // A refused offline thread offers the person the choice that resolves it.
+    const conflict = band.conflict ? [
+      <Button key="fork" plain dimColor label={band.conflict.fork}
+        onPress={() => { if (feed.session) beginRefusalResolution($, feed.session, 'fork') }} />,
+      <Button key="discard" plain dimColor label={band.conflict.discard}
+        onPress={() => { if (feed.session) beginRefusalResolution($, feed.session, 'discard') }} />,
+    ] : []
+    // Every control is set apart by the same gap the band's other segments use.
+    const controls = [copier, sharer, ...conflict].filter((control) => control !== null)
+      .flatMap((control, index) => index ? [<Text key={`gap-${index}`}>{'  '}</Text>, control] : [control])
     const inline = link && !ownRow
     const rows = [
       <Box key="band" flexDirection="row" justifyContent="space-between" columnGap={2}>
@@ -2752,9 +3467,11 @@ export function register(on: On) {
           <Text wrap="truncate-end">
             <Text {...segmentProps(band.mark)}>{band.mark.text}</Text>
             <Text dimColor>{' Delta'}</Text>
-            {inline ? '  ' : ''}{inline ? link : null}{copier ? '  ' : ''}
+            {inline ? '  ' : ''}{inline ? link : null}
+            {band.audience?.length ? <Text>{'  '}{spans(band.audience)}</Text> : null}
+            {controls.length ? '  ' : ''}
           </Text>
-          {copier}
+          {controls}
         </Box>
         {band.right.length ? <Text wrap="truncate-end">{spans(band.right)}</Text> : null}
       </Box>,
@@ -2840,6 +3557,9 @@ export function register(on: On) {
     </Box>
   })
   on('session.end', async ($, e, next) => {
+    sessionSources.delete(e.sessionId)
+    // A session that ended can never reach its capture boundary; release anything held on it.
+    decideCapture(e.sessionId)
     if (sharing?.session === e.sessionId) {
       sharing.cancelled = true
       sharing = undefined
@@ -2865,6 +3585,9 @@ export function register(on: On) {
     runtime.heldRows = undefined
     runtime.retryTimer?.cancel()
     runtime.retryTimer = undefined
+    runtime.uploadRefresh?.cancel()
+    runtime.uploadRefresh = undefined
+    runtime.uploadRefreshAttempts = 0
     runtime.currentTurnId = undefined
     runtime.promptEntering = false
     if (feed.session === e.sessionId) await stopConversation()
@@ -2876,6 +3599,13 @@ export function register(on: On) {
     // Rows not yet saved and a running outbox cleanup still belong to this state.
     if (!runtime.unsaved.length && !runtime.cleanupTask && sessions.get(e.sessionId) === runtime)
       sessions.delete(e.sessionId)
+    // Every end, including a clear or a switch, marks when this session stopped here: only a marked
+    // binding can be pruned, since an unmarked one may be live in another Claude process.
+    try {
+      const stored = await $.store.get(key(e.sessionId)) as Binding | undefined
+      if (stored?.session === e.sessionId && stored.endedAt === undefined)
+        await $.store.set(key(e.sessionId), { ...stored, endedAt: await $.clock.now() })
+    } catch { /* a session that cannot record its end is simply never pruned */ }
     // Exiting ends the session's use of its checkouts. A clear is the join's own transition and a
     // resume only switches sessions, so neither releases them.
     if (releasesMounts(e.reason)) await releaseMounts($, e.sessionId)
@@ -2895,7 +3625,7 @@ export function register(on: On) {
   })
 
   on('session.start', async ($, e, next) => {
-    await $.command.register({ name: 'delta', description: 'Share or join a Delta conversation, or select an organization', argumentHint: 'share | join <shared-link-or-thread> | org list | org current | org switch <ID>' })
+    await $.command.register({ name: 'delta', description: 'Share or join a Delta conversation, set up automatic recording, or select an organization', argumentHint: 'share | join <shared-link-or-thread> | setup | org list | org current | org switch <ID>' })
     const result = await next(e)
     const session = await $.session.id()
     try { await activate($, session) }
@@ -2920,10 +3650,21 @@ export function register(on: On) {
   })
 
   on('classic.SessionStart', async ($, e, next) => {
+    sessionSources.set(e.session_id, typeof e.source === 'string' ? e.source : '')
+    // A new session's capture boundary opens before anything can reach a hook, and `startSession`
+    // resolves it once the policy and contract decision is made.
+    if (newSessionFor(e.session_id)) beginCaptureDecision(e.session_id)
     const result = await next(e)
-    if (joining) return result
+    if (joining) {
+      // A join runs its own transition and never auto-activates, so nothing waits on this session.
+      decideCapture(e.session_id)
+      return result
+    }
     try { await activate($, e.session_id) }
     catch (error) { await report($, error) }
+    // Only a new session (startup or clear) is auto-activated; a resume, compaction, or fork keeps
+    // whatever policy it had. The offer and activation never delay a prompt.
+    $.clock.after(0, () => { void startSession($, e.session_id).catch((error) => { void report($, error) }) })
     return result
   })
 
@@ -2936,10 +3677,12 @@ export function register(on: On) {
     // person or another plugin, and gets the usage text below.
     if (internal !== undefined && e.origin?.kind === 'plugin' && e.origin.name === $.plugin.name)
       return { text: SHOW_ANSWER }
+    // The setup wizard only writes the checkout's policy; it needs no session binding or activation.
+    if (action === 'setup') return { text: await setupCommand($) }
     const locator = /^join\s+(\S+)$/.exec(action)?.[1]
     const organization = /^org\s+(?:(list|current)|(switch)\s+(\S+))$/.exec(action)
     if (action !== 'share' && !locator && !organization)
-      return { text: 'Usage: /delta share | /delta join <shared-link-or-thread> | /delta org list | /delta org current | /delta org switch <ID>' }
+      return { text: 'Usage: /delta share | /delta join <shared-link-or-thread> | /delta setup | /delta org list | /delta org current | /delta org switch <ID>' }
     if (joining) return { text: 'A Delta join is already in progress. Wait for its result.' }
     if (sharing) return { text: 'A Delta share is already in progress. Wait for its result.' }
     if (organization)
@@ -2998,6 +3741,9 @@ export function register(on: On) {
     if (shown !== undefined) return next({ ...e, message: { ...e.message, content: shown } })
     if (!capturedMessage(e.message, e.door)) return next(e)
     const session = await $.session.id()
+    // A row from a brand-new session waits for its capture boundary, so a prompt or its output that
+    // reaches a hook before the snapshot is staged is recorded under the session's new thread.
+    await captureDecided(session)
     const runtime = stateFor(session)
     // The hand-off's one-word turn, its prompt included, stays out of the thread.
     if (runtime.localTurn) return next(e)

@@ -6,7 +6,7 @@ import {
   parseThreadStatus, parseWatchEvent,
 } from './thread-commands'
 
-test('documented status, mount, append receipts and watch frames parse at the CLI boundary', () => {
+test('documented status, mount, append receipts, and watch frames parse at the CLI boundary', () => {
   for (const name of ['thread-status.local_only', 'thread-status.granted', 'thread-status.worktrees_unavailable'])
     expect(parseThreadStatus(JSON.stringify(cliFixtureData[name])).worktrees.status).toBe(cliFixtureData[name].worktrees.status)
   expect(parseThreadStatus(JSON.stringify(cliFixtures.status)).thread_id).toBe(cliFixtures.status.thread_id)

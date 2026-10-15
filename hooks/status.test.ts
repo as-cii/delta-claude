@@ -126,6 +126,18 @@ test('as the band narrows it always fits, gives parts up in order, and keeps the
   expect(renderBand(remote, { columns: 40, terminal: false }).link).toMatchObject({ text: shortLink(LINK) })
 })
 
+test('on a narrow one-row band the share control and audience give way before the link', () => {
+  const shared: StatusState = { ...live, audience: 'Private', share: { label: 'Share with Zed Industries' } }
+  const band = renderBand(shared, { columns: 78, terminal: true, rows: 1 })
+  expect(band.link?.text).toBe(LINK)
+  expect(band.share).toBeUndefined()
+  expect(band.audience).toBeUndefined()
+  // A little wider, only the share control has gone.
+  const roomy = renderBand(shared, { columns: 100, terminal: true, rows: 1 })
+  expect(roomy).toMatchObject({ link: { text: LINK }, audience: [{ text: 'Private' }] })
+  expect(roomy.share).toBeUndefined()
+})
+
 test('long tool input keeps its start and end, fitting the available row width', () => {
   const path = '/Users/ada/delta/checkouts/00000000-0000-4000-8000-000000000001/src/main.rs'
   const item = { ...cliFixture('item').item, kind: 'tool_call', author: { user_id: null, name: 'Delta agent' },

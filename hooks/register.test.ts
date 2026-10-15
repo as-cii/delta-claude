@@ -291,7 +291,9 @@ describe('thread commands', () => {
     await $.session.start(sessionStart)
     await fake.share($)
     const calls = fake.appendCalls
-    fake.appendFaults.push(appendEnvelope('invalid_record', 'the server refused the record', { retryable: false }))
+    // A queue of refusals: each append attempt is counted, and the poison record stays until the cause is repaired.
+    for (let attempt = 0; attempt < 10; attempt++)
+      fake.appendFaults.push(appendEnvelope('invalid_record', 'the server refused the record', { retryable: false }))
     await $.tool.call(bash('poison', 'echo poison'))
     await fake.clock.settle()
     const paused = 'invalid_record'
@@ -305,13 +307,22 @@ describe('thread commands', () => {
     fake.upsert(remoteItem('Remote edit'))
     await fake.clock.settle()
     await redraw($)
-    expect((await $.prompt.submit(prompt('still refused'))).drop).toBeDefined()
-    await $.tool.call(bash('queued-behind', 'echo behind'))
     expect(fake.appendCalls).toBe(calls + 1)
-    expectStagedRecords(fake, [2, 3])
+    // The pause stops delivery, not Claude: the prompt is accepted; the next recorded row retries
+    // once, reports the same reason once, and then stays queued.
+    expect((await $.prompt.submit(prompt('still refused'))).drop).toBeUndefined()
+    await $.tool.call(bash('queued-behind', 'echo behind'))
+    await fake.clock.settle()
+    expect(fake.appendCalls).toBe(calls + 2)
+    expect(fake.logs.filter((log) => log.includes(paused))).toHaveLength(1)
+    await $.tool.call(bash('queued-behind-2', 'echo behind'))
+    await fake.clock.settle()
+    expect(fake.appendCalls).toBe(calls + 2)
+    expectStagedRecords(fake, [2, 3, 4])
     // Reattaching resumes delivery, in order, once the cause is repaired.
+    fake.appendFaults.length = 0
     await fake.share($)
-    expect(fake.records().map((record) => record.sequence)).toEqual([1, 2, 3])
+    expect(fake.records().map((record) => record.sequence)).toEqual([1, 2, 3, 4])
     expect(await drawn($)).not.toContain(paused)
     expect(await drawn($)).toContain('"color":"green"')
     fake.expectClean()
@@ -704,6 +715,8 @@ describe('thread commands', () => {
     await $.session.end(sessionEnd(fake.session))
     const saved = structuredClone(fake.store.get(`session:${fake.session}`) as any)
     delete saved.checkoutReference
+    // A resume clears the end marker, so it is not part of the preserved binding.
+    delete saved.endedAt
     fake.store.set(`session:${fake.session}`, saved)
     const worktrees = [
       { reference: 'other#t=0', checkouts: [
@@ -769,22 +782,18 @@ describe('thread commands', () => {
     fake.expectClean()
   })
 
-  for (const code of ['app_unavailable']) test(`a transient ${code} failure is surfaced and retried instead of latching the pause`, async ($, on) => {
+  test('a status check that cannot reach Delta neither stops a shared session\'s delivery nor latches a pause', async ($, on) => {
     const fake = fakeThreads(on, { messages: [text('one')] })
     await $.session.start(sessionStart)
     await fake.share($)
-    fake.commandFault = { operation: 'status', code, message: 'Cannot reach Delta' }
+    // A registered thread's status fails while Delta is unreachable; the records still go out,
+    // acknowledged locally, and the checkout is checked again once the server answers.
+    fake.commandFault = { operation: 'status', code: 'app_unavailable', message: 'Cannot reach Delta' }
     await $.tool.call(bash('while-offline', 'echo queued'))
     await fake.clock.settle()
-    expect(fake.records()).toHaveLength(1)
-    expectStagedRecords(fake, [2])
-    expect(await drawn($)).toContain(code)
-    fake.commandFault = undefined
-    // No watcher refresh intervenes: the next delivery attempt alone must recover.
-    await $.tool.call(bash('after-recovery', 'echo later'))
-    await fake.clock.settle()
-    expect(fake.records().map((record) => record.sequence)).toEqual([1, 2, 3])
+    expect(fake.records().map((record) => record.sequence)).toEqual([1, 2])
     expectStagedRecords(fake, [])
+    fake.commandFault = undefined
     expect((await $.prompt.submit(prompt('proceeds'))).drop).toBeUndefined()
     fake.expectClean()
   })
@@ -817,6 +826,8 @@ describe('thread commands', () => {
       await fake.share($)
       await $.session.end(sessionEnd(fake.session))
       const saved = structuredClone(fake.store.get(`session:${fake.session}`) as any)
+      // A resume clears the end marker, so it is not part of the preserved binding.
+      delete saved.endedAt
       fake.store.set(`session:${fake.session}`, saved)
       const other = { reference: 'different#t=0', checkouts: [{ directory: CHECKOUT, state: 'attached' }] }
       fake.statusPatch = { worktrees: { status: 'available', items: [other] } }
@@ -1046,7 +1057,7 @@ describe('thread commands', () => {
   test('a CLI newer than this plugin asks the person to update the plugin', async ($, on) => {
     const fake = fakeThreads(on, { messages: [text('initial')] })
     await $.session.start(sessionStart)
-    fake.contractRange = { min: 4, max: 4 }
+    fake.contractRange = { min: 5, max: 6 }
     expect(await fake.share($)).toContain('Update the Delta plugin')
     expect(fake.server.thread).toBeUndefined()
     expect(fake.records()).toEqual([])
@@ -1160,7 +1171,7 @@ describe('thread commands', () => {
     await $.session.end(sessionEnd(fake.session))
     const watches = fake.watches.length
     // A resumed session re-checks; a Delta that now speaks only a newer contract blocks it.
-    fake.contractRange = { min: 4, max: 4 }
+    fake.contractRange = { min: 5, max: 6 }
     await $.session.start(sessionStart)
     expect(fake.store.get(`session:${fake.session}`)).toEqual(binding)
     expect(fake.watches.length).toBe(watches)
@@ -1607,13 +1618,9 @@ describe('remote activity', () => {
     expect(fake.watches.length).toBe(watches)
     expect(fake.logs.some((log) => log.includes('not_visible (thread_gone)') && log.includes('/delta share'))).toBe(true)
     expect(JSON.stringify(await $.ui.render(abovePrompt))).toContain('not_visible')
-    expect((await $.prompt.submit(prompt('after deletion'))).drop).toBeDefined()
-    expect(fake.entered).toEqual([])
-    const calls = fake.appendCalls
-    await $.tool.call(bash('while-gone', 'echo queued'))
-    await fake.clock.settle()
-    expect(fake.appendCalls).toBe(calls)
-    expectStagedRecords(fake, [1])
+    // A delivery pause stops delivery, not Claude: the prompt is accepted while the reason stays shown.
+    expect((await $.prompt.submit(prompt('after deletion'))).drop).toBeUndefined()
+    expect(fake.entered).toHaveLength(1)
     fake.expectClean()
   })
 
@@ -1626,7 +1633,9 @@ describe('remote activity', () => {
     const watches = fake.watches.length
     await fake.clock.advance(120_000)
     expect(fake.watches.length).toBe(watches)
-    expect((await $.prompt.submit(prompt('while paused'))).drop).toBeDefined()
+    expect(JSON.stringify(await $.ui.render(abovePrompt))).toContain(code)
+    // The pause stops delivery, not Claude: the prompt is accepted while the reason stays shown.
+    expect((await $.prompt.submit(prompt('while paused'))).drop).toBeUndefined()
     fake.expectClean()
   })
 
@@ -1647,6 +1656,8 @@ describe('remote activity', () => {
 
   test('malformed watch output surfaces failure and reconnects', async ($, on) => {
     const fake = fakeThreads(on)
+    // Contract 2 keeps this test on the server-confirmed path: a prompt waits for the watcher.
+    fake.contractRange = { min: 1, max: 2 }
     await $.session.start(sessionStart)
     await fake.share($)
     fake.live()!.write('{"type":"item","item":{"id":""}}\n')
@@ -1718,6 +1729,8 @@ describe('remote activity', () => {
     await fake.share($)
     await $.session.end(sessionEnd(fake.session))
     const saved = structuredClone(fake.store.get(`session:${fake.session}`) as any)
+    // A resume clears the end marker, so it is not part of the preserved binding.
+    delete saved.endedAt
     let release!: () => void
     fake.holdStatus = new Promise<void>((resolve) => { release = resolve })
     fake.ignoreReadCancellation = true
@@ -2245,12 +2258,14 @@ describe('native turns', () => {
     // Raw journals get a matching digest, so duplicate-key rejection cannot rely on tamper detection.
     await seedPending(fake, [typeof patch === 'string' ? patch
       : { schemaVersion: 1, sequence: 1, turn: { action: 'claim' }, ...patch }])
-    // The manifest's sequence remains 1, even when the saved envelope disagrees.
-    const before = JSON.stringify(fake.store.get(`session:${fake.session}`))
+    // The manifest's sequence remains 1, even when the saved envelope disagrees; a resume clears
+    // the end marker, so it is not part of the preserved binding.
+    const before = structuredClone(fake.store.get(`session:${fake.session}`)) as any
+    delete before.endedAt
     const files = [...fake.files]
     await $.session.start(sessionStart)
     await fake.clock.settle()
-    expect(JSON.stringify(fake.store.get(`session:${fake.session}`))).toBe(before)
+    expect(fake.store.get(`session:${fake.session}`)).toEqual(before)
     expect([...fake.files]).toEqual(files)
     expect(fake.records()).toEqual([])
     expect(fake.operations()).not.toContain('append')
@@ -2324,6 +2339,8 @@ describe('native turns', () => {
 
   test('queued lifecycle survives disconnect and reconnect without replaying a prompt', async ($, on) => {
     const fake = fakeThreads(on, { messages: [text('one')] })
+    // Contract 2 aborts a turn the watcher's loss orphans; offline recording does not.
+    fake.contractRange = { min: 1, max: 2 }
     await $.session.start(sessionStart)
     await fake.share($)
     fake.appendOffline = true
@@ -2456,6 +2473,8 @@ describe('native turns', () => {
 
   test('a disconnected observer held in abort cannot corrupt a restarted live observer or its ready gate', async ($, on) => {
     const fake = fakeThreads(on, { messages: [text('one')] })
+    // Contract 2 aborts the orphaned turn; offline recording leaves it running.
+    fake.contractRange = { min: 1, max: 2 }
     await $.session.start(sessionStart)
     await fake.share($)
     await $.prompt.submit(prompt('owned'))

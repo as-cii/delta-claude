@@ -259,6 +259,14 @@ export function fakeThreads(on: On, options: {
       /** The mounted checkouts of each owner that asked for them, and the directory each was told to work in. */
       groups: new Map<string, { directory: string; mounts: Map<string, { name: string; directory: string; active: boolean }> }>(),
       shared: false,
+      /** The upload intent `thread create` recorded, before or after the thread registers with the cloud. */
+      upload: undefined as { organization: string; visibility: 'private' | 'organization' } | undefined,
+      /** Whether Delta has registered the thread with the cloud, which upgrades local-only access. */
+      registered: false,
+      /** Whether Delta has confirmed the thread's content upload; only then is `upload.state` `uploaded`. */
+      confirmed: false,
+      /** A failure reason Delta reports for the thread's background upload, replacing any success. */
+      uploadFailure: undefined as string | undefined,
       /** The thread's items as other clients recorded them; this producer's own are never watched. */
       items: new Map<string, WatchItem>(),
       /** The thread's delivered comments, which a snapshot sends after the items. */
@@ -280,6 +288,8 @@ export function fakeThreads(on: On, options: {
     appendFaults: [] as AppendFault[],
     /** Every append fails before accepting anything until cleared. */
     appendOffline: false,
+    /** The server refuses the thread's recorded changes until the person forks them into a kept thread or discards them. */
+    refusedChanges: undefined as { fork?: string } | undefined,
     appendCalls: 0,
     /** Patches every ready frame, e.g. to simulate a different conversation. */
     readyPatch: undefined as Record<string, unknown> | undefined,
@@ -294,7 +304,7 @@ export function fakeThreads(on: On, options: {
     /** Replaces the default watch readiness and snapshot. */
     onWatch: undefined as ((watch: Watch, index: number) => void) | undefined,
     commandFault: undefined as { operation: string; message: string; code?: string; reason?: string; retryable?: boolean; after?: boolean; exitCode?: number } | undefined,
-    /** The recording-contract range `thread contract` reports; overrides the fixture's `{min:1,max:2}`. */
+    /** The recording-contract range `thread contract` reports; overrides the fixture's `{min:1,max:4}`. */
     contractRange: undefined as { min?: number; max?: number } | undefined,
     /** Answers `thread contract` like a CLI that predates it: clap error on stderr, exit 2, no JSON. */
     contractUnknownSubcommand: false,
@@ -314,6 +324,14 @@ export function fakeThreads(on: On, options: {
     failWrite: false,
     /** `git rev-parse` fails, as outside a checkout. */
     failGit: false,
+    /** The organizations `delta --json org list` reports. */
+    organizations: undefined as { id: string; name: string; current: boolean }[] | undefined,
+    /** `delta --json org list` fails with a typed error envelope. */
+    failOrgList: false,
+    /** What `git rev-parse --show-toplevel` reports, so a test can simulate a linked worktree. */
+    checkoutRoot: CHECKOUT,
+    /** What `git rev-parse --git-common-dir` reports, shared by worktrees. */
+    gitCommonDir: `${CHECKOUT}/.git`,
     failStoreSet: false as boolean | (() => boolean),
     failRemoval: false,
     holdListing: undefined as Promise<void> | undefined,
@@ -332,6 +350,9 @@ export function fakeThreads(on: On, options: {
     aborts: [] as string[],
     statuses: [] as (string | undefined)[],
     logs: [] as string[],
+    /** Every `AskUserQuestion` the plugin asked, and the answer it receives. */
+    answerQuestion: undefined as ((question: any) => unknown) | undefined,
+    questions: [] as any[],
     /** Every redraw the plugin asked for, including the band animation's timer. */
     invalidates: 0,
     /** The first line of each row the plugin tried to add to Claude's transcript, from its debug log. */
@@ -343,11 +364,26 @@ export function fakeThreads(on: On, options: {
 
     state(): ThreadState & { worktrees: Extract<ThreadState['worktrees'], { status: 'available' }> } {
       const thread = fake.server.thread!
+      const shared = fake.server.shared
+      const upload = fake.server.upload
       return {
         ...cliFixture('status'),
         thread_id: thread,
-        url: fake.server.shared ? urlOf() : null,
-        access: { state: fake.server.shared ? 'granted' : 'local_only', is_owner: fake.server.shared ? true : null },
+        url: shared || fake.server.registered ? urlOf() : null,
+        access: {
+          state: shared || fake.server.registered ? 'granted' : 'local_only',
+          is_owner: shared || fake.server.registered ? true : null,
+        },
+        visibility: shared ? 'organization' : upload && fake.server.registered ? upload.visibility : null,
+        upload: upload ? {
+          state: fake.server.uploadFailure ? 'failed'
+            : fake.server.confirmed ? 'uploaded'
+              : fake.server.registered ? 'uploading' : 'queued',
+          organization_id: upload.organization,
+          error: fake.server.uploadFailure
+            ? { code: 'upload_failed', reason: 'upload_failed', message: fake.server.uploadFailure }
+            : null,
+        } : null,
         worktrees: { status: 'available', items: fake.worktreeItems ?? (fake.server.mount ? [{
           reference: fake.server.mount.reference,
           checkouts: [{ directory: fake.server.mount.directory, state: fake.server.checkout }],
@@ -484,7 +520,11 @@ export function fakeThreads(on: On, options: {
     return { value: undefined }
   })
   on('store.delete', ($, e) => { fake.store.delete(e.key); return { value: undefined } })
+  // Only a Claude build that exposes `$.store.keys` can bound the store; registering the handler is
+  // harmless when the running kit does not know the event.
+  try { on('store.keys', () => ({ value: [...fake.store.keys()] })) } catch {}
   on('session.start', ($, e) => ({ cwd: e.cwd }))
+  on('classic.SessionStart', () => ({}))
   on('session.end', ($, e) => ({ sessionId: e.sessionId }))
   on('session.id', () => ({ value: fake.session }))
   on('session.cwd', () => ({ value: fake.cwd }))
@@ -532,6 +572,9 @@ export function fakeThreads(on: On, options: {
     ({ type: 'Text', props: {}, children: [`the output row: ${e.props.text}`] }))
   on('ui.status', ($, e) => { fake.statuses.push(e.text); return { value: undefined } })
   on('ui.log', ($, e) => {
+    // Claude drops a log whose destination is anything else, so the person never sees it.
+    if (e.to !== undefined && e.to !== 'transcript' && e.to !== 'debug')
+      fake.violations.push(`ui.log with an invalid destination ${JSON.stringify(e.to)}: ${e.text}`)
     const row = /^Adding a row to Claude's context: (.*)$/s.exec(e.text)
     if (e.to !== 'debug') fake.logs.push(e.text)
     else if (row) fake.rows.push(row[1]!)
@@ -562,7 +605,12 @@ export function fakeThreads(on: On, options: {
   })
   on('tool.call', async ($, e) => {
     // Joining asks nothing of its own; Claude's folder trust prompt is the only question.
-    if (e.tool === 'AskUserQuestion') throw new Error('the plugin asked an unexpected question')
+    if (e.tool === 'AskUserQuestion') {
+      fake.questions.push(e)
+      // A test answers the dialog through `answerQuestion`; otherwise it is dismissed, as a person
+      // who closes the prompt would.
+      return (fake.answerQuestion?.(e as never) ?? { deny: 'the person dismissed the question' }) as never
+    }
     if (fake.holdTool) await fake.holdTool
     return { result: { stdout: 'tool output', stderr: '', interrupted: false } } as any
   })
@@ -611,17 +659,39 @@ export function fakeThreads(on: On, options: {
     const parsed = cliArguments(argv)
     const operation = parsed?.positionals[1]
     if (operation) fake.cliIntegrations.push({ operation, integration: e.init?.env?.DELTA_CLI_INTEGRATION })
+    if (parsed?.positionals[0] === 'org' && argv.includes('--json')) {
+      fake.commands.push(argv)
+      if (parsed.positionals[1] !== 'list') {
+        fake.violations.push(`forbidden command: ${argv.join(' ')}`)
+        throw new Error(`forbidden command ${argv.join(' ')}`)
+      }
+      if (fake.failOrgList)
+        return output(JSON.stringify(cliFixture('error', faultEnvelope({
+          code: 'authentication_required', message: 'Sign in to Delta to list organizations',
+        }))), 2)
+      return output(JSON.stringify({
+        operation: 'listed',
+        organizations: fake.organizations ?? [{ id: 'org-1', name: 'Zed', current: true }],
+      }))
+    }
     // The recording-contract probe is counted on its own (`contractChecks`) so tests asserting the
     // plugin's recording commands through `commands`/`delta()`/`operations()` stay unaffected by it.
     if (operation === 'contract') {
+      // A test may hold policy discovery or the contract check itself, as it holds create/upload/attach.
+      const contractHold = await fake.holdRun?.(operation)
+      if (contractHold) await contractHold
       fake.contractChecks++
       if (fake.contractUnknownSubcommand) return output('', 2, "error: unrecognized subcommand 'contract'")
-      return output(JSON.stringify(cliFixture('contract', fake.contractRange ?? { max: 2 })))
+      return output(JSON.stringify(cliFixture('contract', fake.contractRange ?? {})))
     }
     fake.commands.push(argv)
     if (argv[0] === '/selected/delta' && argv[1] === 'org')
       return { value: fake.organizationResult }
-    if (argv[0] === 'git') return fake.failGit ? output('', 128, 'not a git repository') : output(`${CHECKOUT}\n`)
+    if (argv[0] === 'git') {
+      if (fake.failGit) return output('', 128, 'not a git repository')
+      if (argv.includes('--git-common-dir')) return output(`${fake.gitCommonDir}\n`)
+      return output(`${fake.checkoutRoot}\n`)
+    }
     if (argv[0] === 'pwd') return output(`${(e as any).init?.cwd ?? CONFIG}\n`)
     if (argv[0] === 'open') {
       if (fake.failOpen) return output('', 1, 'open: command not found')
@@ -632,7 +702,10 @@ export function fakeThreads(on: On, options: {
       if (fake.failRemoval) return output('', 1, 'removal denied')
       for (const path of argv.slice(3)) {
         const sequence = Number(/\/([0-9]+)-[0-9]+\.json$/.exec(path)?.[1])
-        if (path.includes('/outbox/') && !(sequence < fake.server.next)) fake.violations.push(`deleted an unsynchronized record: ${path}`)
+        // A session whose binding is gone stopped recording and owns no records, so its outbox may go.
+        const owner = /\/outbox\/([^/]+)\//.exec(path)?.[1]
+        const abandoned = owner !== undefined && !fake.store.has(`session:${owner}`)
+        if (path.includes('/outbox/') && !(sequence < fake.server.next) && !abandoned) fake.violations.push(`deleted an unsynchronized record: ${path}`)
         fake.files.delete(path)
       }
       return output('')
@@ -651,9 +724,13 @@ export function fakeThreads(on: On, options: {
     const positionals = operation === 'create' ? [] : operation === 'attach' ? [CHECKOUT] : [threadLocator(parsed?.positionals[2])]
     const options = operation === 'attach' ? { '--thread': fake.server.thread }
       : operation === 'share' ? { '--visibility': 'organization' }
+      : operation === 'fork' || operation === 'discard' ? { ...operation === 'discard' ? { '--force': true as any } : {} }
       : source
-    if (!['create', 'attach', 'share', 'status', 'append'].includes(operation ?? '') ||
-        !matchesCommand(argv, [operation === 'attach' ? 'worktree' : 'thread', operation, ...positionals], options)) {
+    // Create carries its upload intent for an automatic session, and omits it for an explicit share.
+    const optional = operation === 'append' ? ['--acknowledge']
+      : operation === 'create' ? ['--organization', '--visibility'] : []
+    if (!['create', 'attach', 'share', 'status', 'append', 'fork', 'discard'].includes(operation ?? '') ||
+        !matchesCommand(argv, [operation === 'attach' ? 'worktree' : 'thread', operation, ...positionals], options, optional)) {
       fake.violations.push(`forbidden command: ${argv.join(' ')}`)
       throw new Error(`forbidden command ${argv.join(' ')}`)
     }
@@ -661,8 +738,22 @@ export function fakeThreads(on: On, options: {
     const failed = () => output(JSON.stringify(cliFixture('error', faultEnvelope(fault!))), fault!.exitCode ?? 2)
     if (fault && !fault.after) return failed()
     if (operation === 'create') {
+      const organization = parsed!.options['--organization']
+      const visibility = String(parsed!.options['--visibility'])
+      if (organization !== undefined) {
+        if (!['private', 'organization'].includes(visibility))
+          fake.violations.push(`unexpected upload visibility: ${visibility}`)
+        if (fake.server.upload && fake.server.upload.organization !== organization)
+          return output(JSON.stringify(cliFixture('error', faultEnvelope({
+            code: 'invalid_invocation', reason: 'organization_mismatch',
+            message: 'this thread already uploads to a different organization',
+          }))), 2)
+      }
       const created = !fake.server.thread
       fake.server.thread ??= fake.threadId
+      // Re-running create keeps the first accepted intent, like the real CLI's idempotent create.
+      if (organization !== undefined)
+        fake.server.upload ??= { organization: String(organization), visibility: visibility as 'private' | 'organization' }
       return fault ? failed() : output(JSON.stringify(cliFixture('create', { thread_id: fake.server.thread, created })))
     }
     const thread = fake.server.thread
@@ -685,6 +776,17 @@ export function fakeThreads(on: On, options: {
     if (operation === 'status') {
       const result = statusReply()
       return output(result.stdout, result.code)
+    }
+    if (operation === 'fork') {
+      // A fork copies the refused local state into a new kept thread; the original still requires the discard.
+      const fork = fake.refusedChanges?.fork ?? 'thread_fork_example'
+      return fault ? failed() : output(JSON.stringify({
+        source_thread_id: thread, thread_id: fork, name: `${thread} (local changes)`,
+      }, null, 2))
+    }
+    if (operation === 'discard') {
+      fake.refusedChanges = undefined
+      return fault ? failed() : output(JSON.stringify(fake.state()))
     }
     fake.appendCalls++
     if (fake.holdAppend) await fake.holdAppend
@@ -729,7 +831,7 @@ export function fakeThreads(on: On, options: {
       const folder = parsed?.options['--folder'] === true
       const joining = parsed?.options['--join'] === true
       fake.mountRequests.push({ owner, folder, join: joining })
-      if (joining && (fake.contractRange?.max ?? 2) < 3)
+      if (joining && contractMax() < 3)
         fake.violations.push('join-intent flag sent to an older CLI')
       if (!matchesCommand(e.argv, ['thread', 'mount', threadLocator(parsed?.positionals[2])],
         { '--owner': ownerOf(owner), ...folder ? { '--folder': true } : {}, ...joining ? { '--join': true } : {} }))
@@ -816,6 +918,11 @@ export function fakeThreads(on: On, options: {
     return fixture.url.replace(fixture.share_id, fake.shareId)
   }
 
+  /** The newest recording contract this fake CLI speaks, from the test's override or the fixture. */
+  function contractMax(): number {
+    return fake.contractRange?.max ?? (cliFixture('contract').max as number)
+  }
+
   /** The session owns its mounts; a Desktop hand-off mounts under an owner of its own. */
   function ownerOf(owner: string) {
     return owner.startsWith('desktop-') ? owner : fake.session
@@ -827,10 +934,11 @@ export function fakeThreads(on: On, options: {
 
   function statusReply() {
     const fault = fake.commandFault?.operation === 'status' ? fake.commandFault : undefined
-    if (!fake.server.thread || fault)
-      return { code: fault?.exitCode ?? 2, stdout: JSON.stringify(cliFixture('error', fault
-        ? faultEnvelope(fault)
-        : { error: { code: 'app_unavailable', reason: 'app_unavailable', message: 'cannot verify access', retryable: true } })) }
+    if (fault)
+      return { code: fault.exitCode ?? 2, stdout: JSON.stringify(cliFixture('error', faultEnvelope(fault))) }
+    if (!fake.server.thread)
+      return { code: 2, stdout: JSON.stringify(cliFixture('error',
+        { error: { code: 'app_unavailable', reason: 'app_unavailable', message: 'cannot verify access', retryable: true } })) }
     return { code: 0, stdout: JSON.stringify({ operation: 'status', ...fake.state(), ...fake.statusPatch }) }
   }
 
@@ -882,7 +990,10 @@ export function fakeThreads(on: On, options: {
     lines: string[],
     output: (stdout: string, exitCode?: number, stderr?: string) => { value: ProcessRunResult },
   ) {
-    const fault = fake.appendOffline ? { accept: 0, exitCode: 1, stderr: 'offline' } : fake.appendFaults.shift()
+    const fault = fake.refusedChanges
+      ? { accept: 0, exitCode: 2, stdout: () => JSON.stringify(cliFixture('error', faultEnvelope({
+        code: 'reload_required', message: "the server rejected this thread's local changes", retryable: false }))) }
+      : fake.appendOffline ? { accept: 0, exitCode: 1, stderr: 'offline' } : fake.appendFaults.shift()
     const thread = fake.server.thread
     if (!thread) return output(JSON.stringify(cliFixture('error', { error: { code: 'not_shared', reason: 'not_shared', message: 'not shared', retryable: false } })), 2)
     const acks: Record<string, any>[] = []
@@ -892,8 +1003,8 @@ export function fakeThreads(on: On, options: {
       let envelope: Envelope
       try { envelope = JSON.parse(line) } catch { failure = 'malformed JSONL'; break }
       // A CLI whose contract predates titles refuses them, as Delta refuses an unsupported update.
-      if (envelope.update?.sessionUpdate === 'session_info_update' && (fake.contractRange?.max ?? 1) < 2) {
-        fake.violations.push(`a title sent to contract ${fake.contractRange?.max ?? 1}`)
+      if (envelope.update?.sessionUpdate === 'session_info_update' && contractMax() < 2) {
+        fake.violations.push(`a title sent to contract ${contractMax()}`)
         failure = 'unsupported update'
         break
       }
@@ -949,8 +1060,8 @@ function cliArguments(argv: readonly string[]) {
     const argument = argv[index]!
     if (!argument.startsWith('--')) { positionals.push(argument); continue }
     if (Object.hasOwn(options, argument)) return undefined
-    if (argument === '--json' || argument === '--folder' || argument === '--join') { options[argument] = true; continue }
-    if (!['--source', '--external-id', '--thread', '--visibility', '--owner', '--owner-pid'].includes(argument)) return undefined
+    if (argument === '--json' || argument === '--folder' || argument === '--force' || argument === '--join') { options[argument] = true; continue }
+    if (!['--source', '--external-id', '--thread', '--visibility', '--owner', '--owner-pid', '--organization', '--acknowledge'].includes(argument)) return undefined
     const value = argv[++index]
     if (value === undefined || value.startsWith('--')) return undefined
     options[argument] = value
@@ -959,13 +1070,17 @@ function cliArguments(argv: readonly string[]) {
 }
 
 function matchesCommand(
-  argv: readonly string[], positionals: readonly (string | undefined)[], options: Record<string, string | boolean | undefined>,
+  argv: readonly string[], positionals: readonly (string | undefined)[],
+  options: Record<string, string | boolean | undefined>, optional: readonly string[] = [],
 ): boolean {
   const parsed = cliArguments(argv)
-  return !!parsed && parsed.positionals.length === positionals.length &&
-    parsed.positionals.every((value, index) => value === positionals[index]) &&
-    parsed.options['--json'] === true && Object.keys(parsed.options).length === Object.keys(options).length + 1 &&
-    Object.entries(options).every(([name, value]) => parsed.options[name] === value)
+  if (!parsed) return false
+  if (parsed.positionals.length !== positionals.length) return false
+  if (!parsed.positionals.every((value, index) => value === positionals[index])) return false
+  if (parsed.options['--json'] !== true) return false
+  const allowed = new Set([...Object.keys(options), ...optional, '--json'])
+  if (!Object.keys(parsed.options).every((name) => allowed.has(name))) return false
+  return Object.entries(options).every(([name, value]) => parsed.options[name] === value)
 }
 
 function canonical(envelope: Envelope): string {

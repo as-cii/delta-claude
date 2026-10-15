@@ -6,6 +6,10 @@ export type ThreadState = {
   /** The thread's display name; absent from a Delta build that predates it. */
   title?: string | null
   access: { state: 'local_only' | 'granted'; is_owner: boolean | null }
+  /** The thread's audience once a cloud record exists; null or absent before one does. */
+  visibility?: 'private' | 'organization' | 'unlisted' | null
+  /** Delta's background upload of this thread, once an upload intent exists. */
+  upload?: ThreadUpload | null
   worktrees: {
     status: 'available'
     items: {
@@ -16,6 +20,13 @@ export type ThreadState = {
   producer: {
     source: string; external_id: string; next_sequence: number; turn: ThreadTurn | null
   } | null
+}
+
+/** Delta's background upload of a thread, as status reports it. */
+export type ThreadUpload = {
+  state: 'queued' | 'uploading' | 'uploaded' | 'failed'
+  organization_id: string | null
+  error: null | { code: string; reason?: string; message: string }
 }
 
 export type ThreadReady = Pick<ThreadState, 'thread_id' | 'producer'>
@@ -145,14 +156,21 @@ export function classifyCommandFailure(error: unknown): FailureClass {
   return LOCAL_FAILURE_CLASSES[error.code] ?? 'permanent'
 }
 
-/** What is wrong with a failure that will not be retried, for a person to act on. */
-export function permanentFailureAdvice(code: string): string {
+/**
+ * What is wrong with a failure that will not be retried, for a person to act on. A `reason` that
+ * names a more specific cause than its published code wins.
+ */
+export function permanentFailureAdvice(code: string, automatic = false, reason?: string): string {
+  // Delta publishes an organization mismatch as `invalid_invocation`; only the reason tells it apart.
+  if (reason === 'organization_mismatch')
+    return 'This thread already uploads to a different Delta organization; its audience cannot change'
   if (['not_visible', 'authentication_required', 'wrong_account'].includes(code))
     return 'Check your Delta sign-in and access to this thread'
   if (code === 'organization_required')
     return 'Find your organization with `/delta org list`, then select it with `/delta org switch <ID>`'
   if (code === 'not_shared')
-    return 'Share the thread with /delta share'
+    // An automatic session uploads by intent, so it recovers by retrying, not by publishing.
+    return automatic ? 'This repo has not finished asking Delta to upload it' : 'Share the thread with /delta share'
   if (code === 'invalid_reference')
     return 'Fix the thread, worktree, path, or producer reference'
   if (['invalid_record', 'invalid_acknowledgment'].includes(code))
@@ -162,7 +180,8 @@ export function permanentFailureAdvice(code: string): string {
   if (code === 'history_reset')
     return "Delta replaced this thread's history while this session's records were being sent"
   if (code === 'reload_required')
-    return 'Discard the rejected local changes with `delta thread discard` so the thread reloads'
+    // The server refused the thread's local changes; the person forks them into a kept thread or discards them.
+    return 'Choose Fork & Restore or Discard for the rejected local changes, then retry'
   if (code === 'checkout_inactive')
     return 'Mount the checkout again'
   if (code === 'incompatible_app')
@@ -313,7 +332,18 @@ function validBinding(frame: any): boolean {
   return nonempty(frame.thread_id) && (frame.url === null || nonempty(frame.url)) &&
     ['local_only', 'granted'].includes(frame.access?.state) &&
     (frame.access.is_owner === null || typeof frame.access.is_owner === 'boolean') &&
+    (frame.visibility === undefined || frame.visibility === null ||
+      ['private', 'organization', 'unlisted'].includes(frame.visibility)) &&
+    (frame.upload === undefined || frame.upload === null || validUpload(frame.upload)) &&
     validWorktrees(frame.worktrees) && validProducer(frame.producer)
+}
+
+function validUpload(value: any): boolean {
+  return ['queued', 'uploading', 'uploaded', 'failed'].includes(value?.state) &&
+    (value.organization_id === null || nonempty(value.organization_id)) &&
+    (value.error === null || (typeof value.error?.code === 'string' &&
+      (value.error.reason === undefined || typeof value.error.reason === 'string') &&
+      typeof value.error.message === 'string'))
 }
 
 function validProducer(value: any): boolean {
@@ -342,9 +372,14 @@ function inspectionUnavailableMessage(error: { code: string; reason?: string; me
 /** The oldest recording-output contract version this plugin speaks. */
 export const PLUGIN_CONTRACT_VERSION = 1
 /** The newest recording-output contract version this plugin speaks. */
-export const PLUGIN_CONTRACT_MAX = 3
+export const PLUGIN_CONTRACT_MAX = 4
 /** The first contract version whose `append` accepts `session_info_update`, which carries a title. */
 export const TITLE_CONTRACT_VERSION = 2
+/**
+ * The first contract version that records offline: `append --acknowledge local` answers from local
+ * state, so a session this plugin created keeps working without the server.
+ */
+export const OFFLINE_CONTRACT_VERSION = 4
 /** The first contract whose mount command accepts an explicit join-intent flag. */
 export const JOIN_INTENT_CONTRACT_VERSION = 3
 
@@ -361,6 +396,23 @@ export function parseThreadContract(line: string): ThreadContract {
       result.min < 0 || result.max < result.min)
     throw new Error('Unexpected thread contract; use matching CLI and plugin builds')
   return { operation: 'contract', min: result.min, max: result.max }
+}
+
+/** The result of `thread fork`: the new kept thread that holds the refused local changes. */
+export type ForkedThread = { thread_id: string }
+
+/**
+ * Decode a `thread fork` result from its whole pretty-printed stdout, or fail on a malformed one or a
+ * typed error envelope.
+ */
+export function parseThreadFork(stdout: string): ForkedThread {
+  let result: any
+  try { result = JSON.parse(stdout) } catch { throw new Error('Unexpected thread fork result; use matching CLI and plugin builds') }
+  const failure = commandErrorFromEnvelope(result?.error)
+  if (failure) throw failure
+  if (!nonempty(result?.thread_id))
+    throw new Error('Unexpected thread fork result; use matching CLI and plugin builds')
+  return { thread_id: result.thread_id }
 }
 
 /**
@@ -382,12 +434,17 @@ export function contractVersion(range: ThreadContract): number {
   return Math.min(range.max, PLUGIN_CONTRACT_MAX)
 }
 
-/** Select this binding's checkout, never the first entry in a native inventory. */
+/**
+ * Select this binding's checkout, never the first entry in a native inventory. A session this plugin
+ * created itself may participate while its thread is still local-only: its upload intent means the
+ * checkout is attached and recorded, and registering the thread with the cloud happens in the
+ * background. Other bindings still require authenticated shared access.
+ */
 export function validateThreadCheckout(
   state: ThreadState,
-  binding: { checkout?: string; checkoutReference?: string },
+  binding: { checkout?: string; checkoutReference?: string; autoUpload?: unknown },
 ): { directory: string; reference: string } {
-  if (state.access.state !== 'granted')
+  if (state.access.state !== 'granted' && !(binding.autoUpload && state.access.state === 'local_only'))
     throw new Error('The thread has no authenticated shared access; run /delta share to explicitly publish it')
   if (state.worktrees.status === 'unavailable')
     throw new DeltaCommandError(state.worktrees.error.code, inspectionUnavailableMessage(state.worktrees.error), {}, state.worktrees.error.reason)

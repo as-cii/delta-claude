@@ -21,6 +21,12 @@ export type StatusState = {
   retryReason?: string
   /** The thread's share link; absent until a share has published one. */
   link?: string
+  /** The thread's audience as a label, such as `Private` or `Shared with Zed`; shown apart from the link. */
+  audience?: string
+  /** Controls for a thread Delta refused: fork the rejected local changes into a kept thread, or discard them. */
+  conflict?: { fork: string; discard: string }
+  /** A control that publishes a private thread to the organization, like `/delta share`. */
+  share?: { label: string }
   people?: Person[]
   children?: WatchChild[]
   /** The inventory was last observed on a watch that is no longer live. */
@@ -47,6 +53,12 @@ export type BandView = {
    * runs it is shown dim, without one.
    */
   link?: { text?: string; href?: string; ownRow?: true; copy?: { label: string; copied?: true } }
+  /** The thread's audience, shown beside the link; who can see the thread, not whether it has a link. */
+  audience?: StatusSegment[]
+  /** Controls for a thread Delta refused: fork the rejected local changes into a kept thread, or discard them. */
+  conflict?: { fork: string; discard: string }
+  /** A control that publishes a private thread to the organization. */
+  share?: { label: string }
   right: StatusSegment[]
   detail?: StatusSegment[]
   /** Another participant's agent at work, on a line of its own above the band. */
@@ -216,32 +228,38 @@ export function copyText(copy: { label: string; copied?: true }): string {
 export function bandWidth(band: BandView, terminal: boolean): number {
   const link = band.link?.text && !band.link.ownRow ? 2 + textWidth(band.link.text) : 0
   const copy = band.link?.copy ? 2 + textWidth(copyText(band.link.copy)) : 0
+  const audience = band.audience?.length ? 2 + width(band.audience) : 0
+  const conflict = band.conflict ? 2 + textWidth(band.conflict.fork) + 2 + textWidth(band.conflict.discard) : 0
+  const share = band.share ? 2 + textWidth(band.share.label) : 0
   const right = width(band.right)
-  return (terminal ? BAR_PADDING : 0) + width([band.mark, { text: ' Delta' }]) + link + copy + (right ? MIN_GAP + right : 0)
+  return (terminal ? BAR_PADDING : 0) + width([band.mark, { text: ' Delta' }]) + link + audience + copy + share + conflict + (right ? MIN_GAP + right : 0)
 }
 
 /** What gives way as the row narrows, each step keeping the ones before it. */
-type GiveWay = { shortCopy?: true; linkBelow?: true; initials?: true; alone?: true; noLink?: true }
+type GiveWay = { shortCopy?: true; linkBelow?: true; initials?: true; alone?: true; noShare?: true; noAudience?: true; noLink?: true }
 const GIVE_WAY: GiveWay[] = [
   {},
   { shortCopy: true },
   { shortCopy: true, linkBelow: true },
   { shortCopy: true, linkBelow: true, initials: true },
   { shortCopy: true, linkBelow: true, initials: true, alone: true },
-  { shortCopy: true, linkBelow: true, initials: true, alone: true, noLink: true },
+  { shortCopy: true, linkBelow: true, initials: true, alone: true, noShare: true },
+  { shortCopy: true, linkBelow: true, initials: true, alone: true, noShare: true, noAudience: true },
+  { shortCopy: true, linkBelow: true, initials: true, alone: true, noShare: true, noAudience: true, noLink: true },
 ]
 
 /**
  * The band as a view of state; rendering never starts timers or mutates its input. As the row
  * narrows, parts give way in GIVE_WAY's order: the copy label shortens, the terminal's URL moves to
  * a row of its own below, other people become initials and the working agent's owner drops
- * "'s agent", and then the others go. The mark, the link and whoever is working stay; only a band
- * without a row for the URL drops its text, and the copy control still copies it. The desktop's
- * link shows the URL's short form on the row throughout.
+ * "'s agent", the others go, and then the share control and the audience label. The mark, the link
+ * and whoever is working stay; only a band without a row for the URL drops its text, and the copy
+ * control still copies it. The desktop's link shows the URL's short form on the row throughout.
  *
  * Rows go to the band's row, then a failure's reason, then another participant's working agent on a
  * line of its own, then the terminal's URL. With no row for the agent's line, it takes its owner's
- * place on the band's row, as the narrowing above describes.
+ * place on the band's row, as the narrowing above describes. The thread's audience sits beside the
+ * link on the band's row.
  */
 export function renderBand(state: StatusState, layout: { columns: number; terminal: boolean; rows?: number }): BandView {
   const progress = state.progress
@@ -329,6 +347,9 @@ export function renderBand(state: StatusState, layout: { columns: number; termin
     return {
       tone, mark, right: right(give),
       ...detail ? { detail } : {},
+      ...state.audience && !give.noAudience ? { audience: [{ text: state.audience, dim: true }] } : {},
+      ...state.conflict ? { conflict: state.conflict } : {},
+      ...state.share && !give.noShare ? { share: state.share } : {},
       ...activityLine ? { activity: agent(false, true) } : {},
       ...childLine ? { childActivity: childStatus(state.children ?? [], !!state.childrenStale, frame,
         Math.max(10, layout.columns - (layout.terminal ? BAR_PADDING : 0))) } : {},

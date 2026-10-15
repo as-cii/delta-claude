@@ -2,7 +2,7 @@ import { describe, expect, test, tier } from 'claude-code/testing'
 import { cliFixture } from './cli-fixtures'
 import {
   DeltaCommandError, JoinNotReadyError, appendFailure, classifyCommandFailure, contractRefusal, contractVersion, parseAppendReceipt,
-  parseThreadContract, parseThreadMount, permanentFailureAdvice, PLUGIN_CONTRACT_VERSION,
+  parseThreadContract, parseThreadFork, parseThreadMount, permanentFailureAdvice, PLUGIN_CONTRACT_VERSION,
   parseWatchEvent, parseThreadStatus, validateJoinedMounts,
   validateThreadFrontier, validateThreadCheckout, type ThreadReady, type ThreadStatus,
 } from './thread-commands'
@@ -351,10 +351,11 @@ describe('permanent failure advice', () => {
     expect(permanentFailureAdvice('invalid_record')).toContain('Update Delta')
     expect(permanentFailureAdvice('sequence_gap')).toContain('do not reset the sequence')
     expect(permanentFailureAdvice('history_reset')).toContain('replaced this thread')
-    expect(permanentFailureAdvice('reload_required')).toContain('delta thread discard')
+    expect(permanentFailureAdvice('reload_required')).toContain('Fork & Restore or Discard')
     expect(permanentFailureAdvice('checkout_inactive')).toContain('Mount')
     expect(permanentFailureAdvice('incompatible_app')).toContain('restart')
     expect(permanentFailureAdvice('invalid_invocation')).toContain('plugin')
+    expect(permanentFailureAdvice('invalid_invocation', false, 'organization_mismatch')).toContain('different Delta organization')
   })
 })
 
@@ -384,12 +385,21 @@ describe('operation receipts', () => {
       duplicate: true, version: 'server-1', disposition: 'duplicate', turn_sequence: 7, ...patch,
     }), 'thread', 7)).toThrow()
   })
+
+  test('decodes a pretty-printed fork summary and refuses a malformed one', () => {
+    const summary = JSON.stringify({ source_thread_id: 'thread', thread_id: 'thread-fork', name: 'Example (local changes)' }, null, 2)
+    expect(parseThreadFork(summary)).toEqual({ thread_id: 'thread-fork' })
+    expect(() => parseThreadFork('{"source_thread_id":"thread"}')).toThrow('matching CLI and plugin builds')
+    expect(() => parseThreadFork('{"thread_id":""}')).toThrow('matching CLI and plugin builds')
+    expect(() => parseThreadFork('not json')).toThrow('matching CLI and plugin builds')
+    expect(() => parseThreadFork('{"error":{"code":"reload_required","message":"refused"}}')).toThrow(DeltaCommandError)
+  })
 })
 
 describe('recording contract', () => {
   test('decodes a contract range and refuses a malformed one', () => {
-    expect(parseThreadContract(JSON.stringify(cliFixture('contract')))).toEqual({ operation: 'contract', min: 1, max: 3 })
-    expect(parseThreadContract('{"operation":"contract","min":1,"max":3}')).toEqual({ operation: 'contract', min: 1, max: 3 })
+    expect(parseThreadContract(JSON.stringify(cliFixture('contract')))).toEqual({ operation: 'contract', min: 1, max: 4 })
+    expect(parseThreadContract('{"operation":"contract","min":1,"max":5}')).toEqual({ operation: 'contract', min: 1, max: 5 })
     for (const bad of [
       '{"operation":"status","min":1,"max":1}',
       '{"operation":"contract","min":1}',
@@ -403,11 +413,11 @@ describe('recording contract', () => {
 
   test('refuses a CLI older or newer than this plugin, and one that predates the command', () => {
     const at = (min: number, max: number) => ({ operation: 'contract' as const, min, max })
-    for (const range of [at(1, 1), at(1, 2), at(0, 3), at(2, 2)]) expect(contractRefusal(range)).toBeUndefined()
+    for (const range of [at(1, 1), at(1, 2), at(0, 3), at(2, 2), at(3, 4)]) expect(contractRefusal(range)).toBeUndefined()
     expect(contractRefusal(at(0, 0))).toContain('Update Delta')
     expect(contractRefusal(undefined)).toContain('Update Delta')
-    expect(contractRefusal(at(4, 4))).toContain('Update the Delta plugin')
-    expect([at(1, 1), at(1, 2), at(1, 5)].map(contractVersion)).toEqual([1, 2, 3])
+    expect(contractRefusal(at(5, 6))).toContain('Update the Delta plugin')
+    expect([at(1, 1), at(1, 2), at(1, 5)].map(contractVersion)).toEqual([1, 2, 4])
     expect(PLUGIN_CONTRACT_VERSION).toBe(1)
   })
 })

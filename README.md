@@ -99,7 +99,128 @@ or divergent checkouts must be refused rather than overwritten. Participation
 requires authenticated `access.state: "granted"`, not ownership: accessible
 nonowners can read and append, and missing owner metadata is allowed. Only the
 explicit share command requests organization publication, which the server
-authorizes; a URL alone proves neither access nor organization sharing.
+authorizes; a URL alone proves neither access nor organization sharing. A
+session this plugin created itself also participates while its thread is still
+`local_only` (see Automatic recording below).
+
+## Automatic recording and the project policy
+
+A repository opts its collaborators into recording with a shared policy at its
+Git checkout root, `.delta/settings.json`:
+
+```json
+{ "threads": { "mode": "manual" | "private" | "organization", "organization": "<organization id from `delta --json org list`>" } }
+```
+
+- No file, or no `threads` key, is unconfigured and behaves as `manual`: recording
+  only through `/delta share` or `/delta join`. An explicit `manual` behaves the
+  same but counts as configured, which suppresses the onboarding offer.
+- `private` and `organization` require `organization`. They make every **new**
+  session in the checkout record automatically; `private` uploads for you alone
+  until you share it, and `organization` shares with the organization.
+- A malformed file or an invalid value behaves as `manual`, shows the problem
+  once, and is never overwritten without explicit confirmation.
+- A write preserves unknown top-level and nested keys. The file is the
+  repository's shared policy: it belongs in the repository so every collaborator
+  who opens it with the plugin gets it. The wizard writes it but does not commit
+  it; committing it applies the policy to everyone.
+
+The repository setting is sufficient consent for every collaborator who opens
+the checkout with the plugin; no separate personal confirmation is asked.
+
+Run `/delta setup` for an interactive wizard. It shows the current mode and
+organization, offers manual, private upload, or organization sharing, lists
+organization names from `delta --json org list`, explains that uploads include
+the conversation, tool input and output, thinking, and checkout files, previews
+the destination path and resulting content, and writes only after confirmation.
+It does not commit the file: committing it applies the policy to everyone who
+opens the repository with the plugin. Cancelling or dismissing any step leaves
+the file untouched. Print and SDK
+sessions get a clear refusal instead. The policy applies to sessions started
+afterwards, so after writing it the wizard offers to share the current session
+with the organization, as `/delta share` does, unless it is already shared.
+
+When an interactive session starts as a **new** session in a checkout with no
+policy, the plugin offers once, in the background, to set up automatic uploads;
+choosing yes opens the same wizard. Every outcome records a local marker keyed by
+the repository's Git common directory, so linked worktrees share it and it is
+never offered again automatically. It is never offered in a joined session,
+during a join, or headless, and it never delays a prompt beyond the dialog.
+
+Automatic activation applies only to new sessions — `classic.SessionStart` with
+source `startup` or `clear`, never `resume`, `compact`, or `fork`, and never a
+joined session or one with a pending join transition. A resumed or forked session
+that predates the policy is not converted; use `/delta share` for it. Because the
+session is new, its snapshot is taken with no history to export, and live capture
+starts with the first row. In the background it creates the thread with its upload
+intent (`thread create --source claude-code --external-id SESSION --organization ORG
+--visibility private|organization`), attaches the checkout, starts the read-only
+watcher without blocking, and drains the outbox. Records queue durably until each step
+succeeds, and a failure shows in the band and retries. The watcher inspection accepts an
+intent-only `local_only` thread for these sessions, because the upload intent is what
+makes the checkout recorded.
+
+A CLI whose recording contract tops out below 3 cannot record offline, so auto
+mode is unavailable: the plugin says once, in the band and transcript, that Delta
+must be updated for automatic uploads. Manual sharing and joins keep working with
+contract 1–2 behavior.
+
+A session this plugin created itself — auto-activated or an explicit
+`/delta share` — records offline when its CLI speaks contract 3. It appends with
+`--acknowledge local`, so `prompt.submit` and
+`turn.start` do not drop a prompt or abort a Claude turn merely because the
+watcher is not live or the server is unreachable. Retryable failures keep records
+queued and retry with backoff while Claude keeps working; the band shows the
+pending or offline state. A pause stops delivery, not Claude: the next prompt is
+accepted and retries delivery and any unfinished activation once, so a repaired
+cause recovers without a command while a poison record simply stays queued, its
+reason shown once. Recovery advice for an automatic session never names
+`/delta share`, which stays the explicit publish action; a manual session keeps
+its `/delta share` recovery. Local persistence failures still stop the prompt, and
+fenced or superseded turns are still honored. A joined session
+keeps its current, server-confirmed behavior.
+
+A session this plugin created itself never exports a half-initialized binding: its
+thread and checkout become visible to delivery and verification only after
+`thread create` and `worktree attach` both succeed, so a prompt or
+row arriving mid-activation records locally and is never blocked by a checkout
+that is not attached yet.
+
+The plugin store keeps a session's binding and row ledger so it can resume into
+its thread. Bounded cleanup removes them only for a session that really ended more
+than 30 days ago, holds no queued records, no capture failure, and no unfinished
+join transition, and is not active in this process. A session live in another
+Claude terminal has no end marker and is never pruned; a pruned session can no
+longer resume into its thread, and a later `/delta share` starts a new one. Because
+the store is shared and has no transactions, pruning reads, checks, and deletes one
+session at a time, so a session another process resumes can only be lost in that
+session's own read-to-delete window.
+
+The band shows the thread's link whenever status reports one (a URL alone does not
+mean others can see the thread), its audience apart from the link (`Private`,
+`Shared with <organization name>`, or `Unlisted`), and an automatic session's
+background upload as the band's running operation, drawn on its row like a share's
+steps: `Waiting to upload…` or `Uploading to Delta…`, then `Uploaded to Delta`, or
+`Upload failed: <reason>`. Activation returns before Delta registers the thread, and
+Delta registers it a moment before it confirms the content, so the operation runs
+until status reports the link **and** the upload is `uploaded`; the link is drawn dim
+until then, and later per-turn syncs are not shown. The plugin re-reads status on a
+backoff, on its own timer rather than waiting for the watcher. When the server
+rejected a recorded thread's local changes, an append fails with `reload_required`
+and keeps failing until it is resolved: the plugin pauses delivery, keeps Claude
+working, and shows the situation in the band with two controls, **Fork & Restore**
+and **Discard**. Fork & Restore runs `thread fork` then `thread discard --force`,
+copying the refused state into a "<name> (local changes)" thread that inherits
+the original's upload intent and then resets the original to the server's view;
+the plugin names the fork once and drains the queued records into the original.
+Discard runs `thread discard --force`, dropping the refused changes and draining.
+Either choice, or resolving it in the Delta app (the next prompt retries
+delivery), ends the pause; on failure the plugin shows the error and keeps the
+controls. A private thread gets a
+"Share with <organization>" control that runs the same publication flow as
+`/delta share`. `/delta share` on an auto-activated session publishes the existing
+thread in place: no re-export and no new thread. The link no longer waits for an
+explicit share.
 
 ## Join an existing shared thread
 
@@ -228,14 +349,17 @@ The adapter uses ordinary short write/read commands and one JSONL observer:
 
 ```sh
 delta --json thread contract
-delta --json thread create --source claude-code --external-id SESSION
+delta --json org list
+delta --json thread create --source claude-code --external-id SESSION --organization ORG --visibility private|organization
 delta --json worktree attach PATH --thread THREAD
 delta --json thread share THREAD --visibility organization
-delta --json thread append THREAD --source claude-code --external-id SESSION
+delta --json thread append THREAD --source claude-code --external-id SESSION [--acknowledge local|server]
 delta --json thread watch THREAD --source claude-code --external-id SESSION
 delta --json thread status THREAD --source claude-code --external-id SESSION
 delta --json thread mount THREAD --owner SESSION
 delta --json thread unmount THREAD --owner SESSION
+delta --json thread fork THREAD
+delta --json thread discard THREAD --force
 ```
 
 `thread contract` reports the recording-output contract versions the CLI build speaks
@@ -243,7 +367,22 @@ delta --json thread unmount THREAD --owner SESSION
 plugin calls it once per session before its first recording command. If the plugin's contract version
 is outside that range, the plugin refuses to share, join, or resume and says to update Delta (the CLI
 is older than the plugin) or the plugin (the CLI is newer); a CLI that predates the subcommand is
-treated as an older Delta.
+treated as an older Delta. The plugin speaks contract versions 1–3; 3 is the first that records
+offline (see Automatic recording).
+
+`thread create` records a durable upload intent when given `--organization` and
+`--visibility private|organization`, without waiting for the network. It is idempotent by external
+id: re-running it returns the same thread, keeps the first accepted intent, and retries a parked
+upload. A different organization from an existing intent fails with a non-retryable
+`organization_mismatch`; an already-registered thread records no intent. Delta then uploads in the background, retrying after a reconnect or restart.
+
+`append` takes `--acknowledge local` or `server` (the default). `local` is accepted for a registered
+thread or one with an upload intent and acknowledges each record once it is durable locally, without
+waiting for the server; if the thread must catch up while Delta is offline, it fails promptly with a
+retryable error, which the plugin's envelope-driven retry handles.
+
+`org list` returns `{"operation":"listed","organizations":[{"id","name","current"}]}` and carries
+the typed error envelope.
 
 Contract 3 adds `thread mount --join` for an explicit join attempt. The plugin
 passes it only while completing a requested `/delta join`, not while restoring a
@@ -252,7 +391,10 @@ kept across `/clear`. Older compatible CLI versions receive no new flag. New
 apps emit no join telemetry for mounts without it. This prevents background
 maintenance from adding user activity.
 
-The plugin speaks contract versions 1 through 3. Version 2 adds ACP's `session_info_update` to `append`,
+Contract 4 adds `thread create --organization --visibility`, `thread append --acknowledge local`,
+and status `visibility` and `upload`; the plugin records offline only on contract 4.
+
+The plugin speaks contract versions 1 through 4. Version 2 adds ACP's `session_info_update` to `append`,
 carrying the session's title, which Delta makes the thread's name in place of "Recorded conversation".
 When a shared session's turn ends, the plugin reads the title from that session's own transcript
 file, whose path the turn's end names: Claude's own `ai-title` row, or a `/rename`'s `custom-title`
@@ -307,8 +449,16 @@ and takeover behavior.
 
 Every `appended` receipt reports `recorded`, `fenced`, or `duplicate`, plus
 `thread_id`, `sequence`, `next_sequence`, `duplicate`, `version`, and
-`turn_sequence` (a number or null). Valid matching receipts release only the
-durable pending prefix. They acknowledge recording, not permission to execute.
+`turn_sequence` (a number or null). When the server rejected the thread's local
+changes, the append fails with `reload_required` and keeps failing until the person
+resolves it. `thread fork THREAD` copies the refused state into a "<name> (local
+changes)" thread that inherits the original's upload intent and leaves the original
+unchanged, answering a pretty-printed summary
+`{"source_thread_id":"<original>","thread_id":"<fork>","name":"..."}`.
+`thread discard THREAD --force` resets the original to the server's view, dropping
+the refused local changes. Failures use the typed error envelope. Valid matching
+receipts release only the durable pending prefix. They acknowledge recording, not
+permission to execute.
 
 Older outbox controls and output associations are translated to lifecycle/content
 envelopes when sent, preserving their sequence numbers and immutable files.
@@ -327,6 +477,10 @@ ID appears only in share URLs; the adapter never changes its binding to that ID.
 ```text
 {
   operation: "status", thread_id, url: null | string,
+  visibility: "private" | "organization" | "unlisted" | null,
+  upload: null | { state: "queued" | "uploading" | "uploaded" | "failed",
+                    organization_id: string | null,
+                    error: null | { code, reason, message } },
   access: {state: "local_only" | "granted", is_owner: null | boolean},
   worktrees: {status: "available",
               items: [{reference: "HISTORY_UUID#t=TIMELINE",
@@ -336,9 +490,15 @@ ID appears only in share URLs; the adapter never changes its binding to that ID.
 }
 ```
 
+`visibility` is null until a cloud record exists; `upload` is null until an upload intent exists.
+Status answers from local state, probing the server for the thread's access metadata, so a locally
+known thread is still readable when the server is unreachable. An intent-only, not-yet-registered
+thread reports `access.state: "local_only"` with a non-null `upload`; a session this plugin created
+itself accepts that state as valid for participation, while other bindings require `granted`.
+
 Unregistered local threads report `local_only` and `is_owner: null`. Registered
-threads verify authenticated backend access; denial or an offline backend returns
-a typed error instead of inferring access from a URL. The adapter checks the
+threads verify authenticated backend access; a denial returns a typed error instead of
+inferring access from a URL. The adapter checks the
 producer's `source: "claude-code"` and actual Claude session `external_id`;
 `producer: null` is valid native observer output but cannot participate or supply
 a synthetic empty ledger. Supplying a new producer identity reports its native
@@ -379,7 +539,9 @@ detaches one explicitly.
 
 ## Privacy and durability
 
-Nothing is exported before `/delta share` or a completed `/delta join`. Joining
+Nothing is exported before `/delta share`, a completed `/delta join`, or the
+automatic activation a repository's policy asks for. Automatic activation records
+only new activity from a new session: it never exports historical context. Joining
 records only new local activity, never a bulk export of old context. Organization sharing includes conversation
 tool inputs/outputs, images and thinking text, plus staged, unstaged and eligible
 untracked checkout files. Draft text is not exported.
@@ -471,13 +633,18 @@ within a few seconds is never shown; past that grace the mark turns yellow and t
 the band last saw dim. A failure, or a send being retried, adds a second row with the
 reason and what to do.
 
-The thread's link follows the mark once a share has published it: on the terminal the URL
+The thread's link follows the mark whenever status reports one, whether or not a
+share published it: on the terminal the URL
 itself, as text that terminals make clickable (a hyperlink would be drawn twice by a terminal
 without hyperlink support), and on the desktop a link labelled with its short form. Beside it
 is a copy control, which a click presses, or Enter once the band has the focus (ctrl+x tab
-lands on it), and which confirms only once the clipboard took the link. While a share
-or join still runs, the link shows dimmed and is not offered; before a share has published,
-the band says the link appears when ready. It is never written to the transcript.
+lands on it), and which confirms only once the clipboard took the link. The thread's
+audience sits beside the link (`Private`, `Shared with <organization name>`, or
+`Unlisted`), and Delta's background upload takes a row of its own while it is queued,
+uploading, or failed. A private thread also offers a "Share with <organization>"
+control that runs the same publication flow as `/delta share`. While a share
+or join still runs, the link shows dimmed and is not offered; before status reports
+one, the band says the link appears when ready. It is never written to the transcript.
 
 The right side says who is here: everyone settled in the thread, by first name (with a last
 initial where two share one) in the color their user id gives them, which their transcript
@@ -656,7 +823,17 @@ durable retries, metadata filtering, exact turn cancellation, late-output fencin
 reconnect/shutdown, and safe outbox cleanup; watch decoding; row rendering,
 truncation, deduplication and corrections; the status band (including child snapshots,
 compact layout and disconnected status), visible rows, and the
-handling of watch errors. The test host keeps no rows: a plugin's own `session.append`
+handling of watch errors. It also checks the project policy (parsing, round-trip
+over unknown keys, invalid values), the setup wizard (writing only after
+confirmation, and leaving the file untouched on cancel), the one-time onboarding
+offer per repository, automatic activation only for startup/clear sessions, a
+prompt and rows arriving during each activation step without a pause or a dropped
+prompt, private mode issuing no `thread share`, offline recording keeping prompts
+and turns and draining after reconnect, a refused offline append showing the
+Fork & Restore/Discard choice and draining after either, the band's link,
+audience, waiting and uploading state, and share control, the bounded store
+cleanup that never removes a pending or live session, and the organization picker
+for more than four organizations. The test host keeps no rows: a plugin's own `session.append`
 still fails, and those tests observe each attempted row through its debug log line. The
 host also records every row a plugin passes down to `session.append`, after the plugin's
 own hook rewrote it, which is how the tests check what the model would read; unit tests
@@ -782,9 +959,9 @@ directory mounting and moving Claude again.
 
 The adapter captures only the main conversation and current checkout. Claude's
 mod API lacks a reliable inventory of `--add-dir` roots; additional roots are not
-attached. Historical provenance, inbound images, typing presence, and retention of
-Claude's 4 MiB plugin store (bindings and row records are kept per session) remain
-open. The status band's rendering above the prompt was confirmed in Claude Code
+attached. Historical provenance, inbound images, and typing presence remain open;
+the plugin store is bounded by the retention described above. The status band's
+rendering above the prompt was confirmed in Claude Code
 2.1.292 with a plugin that draws there. Mods are enabled
 by default in 2.1.287, subject to organization policy, and their API can change.
 

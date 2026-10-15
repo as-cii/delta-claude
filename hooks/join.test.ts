@@ -131,7 +131,8 @@ describe('joining', () => {
     expect(fake.commands.some((argv) => argv[0] === 'pwd')).toBe(false)
     expect(fake.server.mount).toEqual({ thread: fake.threadId, directory: CHECKOUT, reference: REFERENCE })
     expect(fake.files.get(`${CHECKOUT}/precious.txt`)).toBe('untouched')
-    expect(fake.store.get(`session:${previousSession}`)).toEqual(old)
+    // The previous session is left as it was, apart from the end marker bounded cleanup reads.
+    expect(fake.store.get(`session:${previousSession}`)).toEqual({ ...old, endedAt: expect.any(Number) })
     expect(fake.exports).toBe(0)
     expect(fake.records()).toEqual([])
     expect(fake.entered).toEqual([])
@@ -150,7 +151,7 @@ describe('joining', () => {
     expect(fake.session).toBe(before)
     expect(fake.sessionCommands).toEqual([])
     // A one-worktree thread asks for its thread folder, which Desktop opens as a plain folder.
-    expect(fake.mountRequests).toEqual([{ owner: offer.owner, folder: true, join: false }])
+    expect(fake.mountRequests).toEqual([{ owner: offer.owner, folder: true, join: true }])
     expect(fake.opened).toEqual([newSessionLink(offer.folder, HANDOFF_PROMPT)])
     expect(JSON.parse(fake.files.get(offer.record)!)).toMatchObject({
       owner: offer.owner, thread: fake.threadId, locator: link(fake), directory: offer.folder,
@@ -671,7 +672,7 @@ describe('joining', () => {
     expect(joined).toMatchObject({ joined: true, thread: fake.threadId, next: 1, pending: [] })
     expect(joined.directory).not.toBe(binding.directory)
     expect(fake.sessionCommands.slice(transitions)).toEqual([{ command: 'clear', args: '' }, { command: 'cd', args: joined.directory }])
-    expect(fake.store.get(`session:${previous}`)).toEqual(binding)
+    expect(fake.store.get(`session:${previous}`)).toMatchObject(binding)
     for (const entry of binding.pending) for (const path of entry.files) expect(fake.files.has(path)).toBe(true)
     expect(fake.exports).toBe(0)
     expect(fake.entered).toEqual([])
@@ -713,7 +714,7 @@ describe('joining', () => {
     expect(fake.live()).toBe(watch)
     expect(watch.closed).toBe(false)
     expect(fake.store.get(`session:${fake.session}`)).toMatchObject({ thread: fake.threadId, joined: true, owner: fake.session })
-    expect(fake.store.get(`session:${previous}`)).toEqual(binding)
+    expect(fake.store.get(`session:${previous}`)).toMatchObject(binding)
     expect(fake.sessionCommands.slice(0, transitions.length)).toEqual(transitions)
     expect(fake.operations().length).toBe(commands)
     expect(fake.rows).toEqual([])
