@@ -28,9 +28,10 @@ Loading or resuming the plugin never installs Delta or
 starts sign-in. Changing Claude sessions stops the command, not a sign-in another
 Delta client may also be using.
 
-The plugin does not switch accounts or choose an organization for you. If Delta
-asks for an organization, select it in Delta (or with `delta org switch <ID>`)
-and retry. If the CLI is not on `PATH`, use its absolute path.
+If Delta asks for an organization, run `/delta org list`, select one with
+`/delta org switch <ID>`, and retry. `/delta org current` shows the current
+selection. These commands use the same system-wide selection as `delta org`
+in your terminal.
 If access is denied, resolve the approval or terms requirement at the shown URL,
 then run the displayed `auth login` command to refresh sign-in before retrying.
 Delta's common, windowless client owns the account store, synchronization, and

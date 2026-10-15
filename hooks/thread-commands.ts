@@ -148,7 +148,7 @@ export function permanentFailureAdvice(code: string): string {
   if (['not_visible', 'authentication_required', 'wrong_account'].includes(code))
     return 'Check your Delta sign-in and access to this thread'
   if (code === 'organization_required')
-    return 'Select an organization with `delta org switch`'
+    return 'Find your organization with `/delta org list`, then select it with `/delta org switch <ID>`'
   if (code === 'not_shared')
     return 'Share the thread with /delta share'
   if (code === 'invalid_reference')

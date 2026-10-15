@@ -1267,6 +1267,21 @@ async function command($: Runtime, args: string[], name: string, check?: () => P
   return checkResult(result, name)
 }
 
+/** Let the CLI own organization selection and its human-readable result. */
+async function organizationCommand($: Runtime, args: string[]) {
+  try {
+    const executable = await resolveCli($)
+    const result = await $.process.run([executable, 'org', ...args], { timeoutMs: 120_000 })
+    if (result.isStdoutTruncated || result.isStderrTruncated)
+      throw new Error('Delta organization output was truncated; check the selection with /delta org current.')
+    if (result.exitCode !== 0)
+      throw new Error(result.stderr.trim() || result.stdout.trim() || `Delta exited with code ${result.exitCode}`)
+    return { text: result.stdout.trim() }
+  } catch (error) {
+    return { text: `Delta organization command failed: ${String(error)}` }
+  }
+}
+
 /** The directory a binding's records are checked against, or undefined while setup is incomplete. */
 function boundDirectory(binding?: Binding): string | undefined {
   if (!binding?.thread) return
@@ -2811,7 +2826,7 @@ export function register(on: On) {
   })
 
   on('session.start', async ($, e, next) => {
-    await $.command.register({ name: 'delta', description: 'Share or join a Delta conversation', argumentHint: 'share | join <shared-link-or-thread>' })
+    await $.command.register({ name: 'delta', description: 'Share or join a Delta conversation, or select an organization', argumentHint: 'share | join <shared-link-or-thread> | org list | org current | org switch <ID>' })
     const result = await next(e)
     const session = await $.session.id()
     try { await activate($, session) }
@@ -2853,10 +2868,13 @@ export function register(on: On) {
     if (internal !== undefined && e.origin?.kind === 'plugin' && e.origin.name === $.plugin.name)
       return { text: SHOW_ANSWER }
     const locator = /^join\s+(\S+)$/.exec(action)?.[1]
-    if (action !== 'share' && !locator)
-      return { text: 'Usage: /delta share | /delta join <shared-link-or-thread>' }
+    const organization = /^org\s+(?:(list|current)|(switch)\s+(\S+))$/.exec(action)
+    if (action !== 'share' && !locator && !organization)
+      return { text: 'Usage: /delta share | /delta join <shared-link-or-thread> | /delta org list | /delta org current | /delta org switch <ID>' }
     if (joining) return { text: 'A Delta join is already in progress. Wait for its result.' }
     if (sharing) return { text: 'A Delta share is already in progress. Wait for its result.' }
+    if (organization)
+      return organizationCommand($, organization[1] ? [organization[1]] : ['switch', '--', organization[3]!])
     const session = await $.session.id()
     let shareRequest: ShareRequest | undefined
     try {

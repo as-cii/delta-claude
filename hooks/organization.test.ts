@@ -1,0 +1,53 @@
+import { expect, test, tier } from 'claude-code/testing'
+import { fakeThreads, sessionStart, shareCommand } from './fake-thread-commands'
+
+tier('user')
+
+test('organization commands return CLI output on a headless host using the selected executable', async ($, on) => {
+  const fake = fakeThreads(on)
+  fake.surfaces = []
+  await $.session.start(sessionStart)
+  for (const [args, stdout] of [
+    ['org list', '* org_one\tFirst team\n  org_two\tSecond team\n'],
+    ['org current', 'org_one\tFirst team\n'],
+    ['org switch org_two', 'org_two\tSecond team\n'],
+  ] as const) {
+    fake.organizationResult.stdout = stdout
+    expect(await $.command.run({ ...shareCommand, args })).toEqual({
+      text: stdout.trim(),
+    })
+  }
+  expect(fake.commands).toEqual([
+    ['/selected/delta', 'org', 'list'],
+    ['/selected/delta', 'org', 'current'],
+    ['/selected/delta', 'org', 'switch', '--', 'org_two'],
+  ])
+  expect(fake.exports).toBe(0)
+  expect(fake.authCalls).toEqual([])
+  fake.expectClean()
+})
+
+test('invalid organization syntax and CLI failures are returned without sharing', async ($, on) => {
+  const fake = fakeThreads(on)
+  await $.session.start(sessionStart)
+  for (const args of ['org switch', 'org switch one two', 'org current extra', 'org create team']) {
+    const result = await $.command.run({ ...shareCommand, args })
+    expect(result.text).toContain('/delta org switch <ID>')
+  }
+  expect(fake.commands).toEqual([])
+  fake.organizationResult.exitCode = 1
+  fake.organizationResult.stderr = 'organization is not a membership'
+  expect(await $.command.run({ ...shareCommand, args: 'org switch --help' })).toEqual({
+    text: 'Delta organization command failed: Error: organization is not a membership',
+  })
+  expect(fake.commands).toEqual([['/selected/delta', 'org', 'switch', '--', '--help']])
+  fake.organizationResult.exitCode = 0
+  fake.organizationResult.stderr = ''
+  fake.organizationResult.stdout = 'org_two\tSecond team\n'
+  fake.organizationResult.isStdoutTruncated = true
+  expect(await $.command.run({ ...shareCommand, args: 'org current' })).toEqual({
+    text: 'Delta organization command failed: Error: Delta organization output was truncated; check the selection with /delta org current.',
+  })
+  expect(fake.exports).toBe(0)
+  fake.expectClean()
+})

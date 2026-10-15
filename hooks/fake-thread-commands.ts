@@ -289,6 +289,7 @@ export function fakeThreads(on: On, options: {
     authReplies: [] as { status: string; [key: string]: unknown }[],
     holdAuth: undefined as Promise<void> | undefined,
     authWaitClosed: false,
+    organizationResult: { stdout: '', stderr: '', exitCode: 0, isStdoutTruncated: false, isStderrTruncated: false },
     cliMissing: false,
     cliSetups: [] as string[],
     holdCliSetup: undefined as ((install: boolean) => Promise<void> | undefined) | undefined,
@@ -600,6 +601,8 @@ export function fakeThreads(on: On, options: {
       return output(JSON.stringify(cliFixture('contract', fake.contractRange ?? {})))
     }
     fake.commands.push(argv)
+    if (argv[0] === '/selected/delta' && argv[1] === 'org')
+      return { value: fake.organizationResult }
     if (argv[0] === 'git') return fake.failGit ? output('', 128, 'not a git repository') : output(`${CHECKOUT}\n`)
     if (argv[0] === 'pwd') return output(`${(e as any).init?.cwd ?? CONFIG}\n`)
     if (argv[0] === 'open') {
