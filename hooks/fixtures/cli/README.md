@@ -6,7 +6,7 @@ only generated identities and absolute caller paths.
 
 | Files | Examples and checks |
 | --- | --- |
-| `thread-status.{local_only,granted,worktrees_unavailable}.json` | Producer status, access and inventory availability; `delta_ipc::cli_output::tests::recording_outputs_match_cli_fixtures`. |
+| `thread-status.{local_only,granted,worktrees_unavailable}.json` | Producer status, nullable current title, access and inventory availability; `delta_ipc::cli_output::tests::recording_outputs_match_cli_fixtures`. |
 | `thread-append.{recorded,fenced,duplicate}.json`, `thread-append.batch.jsonl` | Append dispositions, nullable turn sequence and ordered receipts; the same builder test. |
 | `thread-create.json`, `thread-share.json` | Creation and sharing receipts; the same builder test. |
 | `thread-contract.json` | The recording-output contract versions this build speaks; the same builder test. |
@@ -19,6 +19,16 @@ only generated identities and absolute caller paths.
 
 Recording host integration tests also compare status, readiness and turn/presence
 output against these examples, retaining their behavioral assertions.
+
+The mount fixture's top-level `directory` is the session's working directory.
+With `thread mount --folder`, it is a plain thread folder even for a single
+worktree; each worktree's `directory` still points to its checkout. The result
+shape is unchanged.
+
+Status objects always include `title`: the thread's current display name as a
+string, or `null` when unnamed. This is the loaded thread's name, not a cached
+catalog name. The local-only and granted fixtures show named threads; the
+unavailable-worktrees fixture shows an unnamed thread.
 
 From the repository root, regenerate in this order:
 

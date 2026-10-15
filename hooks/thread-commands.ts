@@ -1,6 +1,8 @@
 export type ThreadState = {
   thread_id: string
   url: string | null
+  /** The thread's display name; absent from a Delta build that predates it. */
+  title?: string | null
   access: { state: 'local_only' | 'granted'; is_owner: boolean | null }
   worktrees: {
     status: 'available'

@@ -15,7 +15,7 @@ import {
   DeltaCommandError, DeltaSendError, appendFailure, classifyCommandFailure, permanentFailureAdvice,
   JoinNotReadyError, contractRefusal, contractVersion, parseThreadContract, parseThreadMount, parseThreadStatus, parseWatchEvent,
   validateJoinedMounts, validateThreadFrontier, validateThreadCheckout, PLUGIN_CONTRACT_VERSION, TITLE_CONTRACT_VERSION,
-  type MountedThread, type ThreadContract, type ThreadMount, type ThreadReady, type ThreadTurn, type WatchChild, type WatchEvent, type WatchItem,
+  type MountedThread, type ThreadContract, type ThreadMount, type ThreadReady, type ThreadState, type ThreadTurn, type WatchChild, type WatchEvent, type WatchItem,
 } from './thread-commands'
 import {
   RemoteView, addRows, commentAction, commentAuthor, commentDisplay, commentMarkdown, commentQuote,
@@ -24,6 +24,9 @@ import {
 } from './conversation'
 import { TitleScanner, transcriptRead } from './title'
 import { DeltaCli } from './cli'
+import {
+  HANDOFF_ACKNOWLEDGEMENT, HANDOFF_EXPIRY_MS, HANDOFF_PROMPT, newSessionLink, parseHandoff, type Handoff,
+} from './handoff'
 
 type Runtime = EngineInterface
 type Entry = { sequence: number; files: string[]; digest: string }
@@ -43,7 +46,10 @@ type Binding = {
   /** Last confirmed location of a shared session's attached checkout, not proof that the thread still owns it. */
   checkout?: string
   checkoutReference?: string
-  /** A joined session's mount owner, which is its Claude session ID. */
+  /**
+   * A joined session's mount owner: its Claude session ID, or for a session that took over a
+   * Desktop hand-off, the owner the offering tab mounted under.
+   */
   owner?: string
   /** The directory a joined session works in: the checkout of a thread's only worktree, else the thread folder. */
   directory?: string
@@ -66,7 +72,8 @@ type Binding = {
 type RemoteTurn = { turnId: string | null; name: string; id?: string; since?: number; heard?: number }
 /** A share or join that the band is reporting: running, finished, or failed. */
 type ProgressTone = 'active' | 'done' | 'error'
-type JoinPlan = { session: string; cwd: string; locator: string; thread: string }
+/** A join to finish in a session; `owner` names a mount another session made for it to take over. */
+type JoinPlan = { session: string; cwd: string; locator: string; thread: string; owner?: string }
 type JoinRequest = { session: string; cwd: string; locator: string; fresh?: string; clearing?: boolean; cancelled?: boolean }
 type ShareRequest = { session: string; cwd: string; cancelled?: boolean }
 
@@ -80,6 +87,8 @@ const MOUNT_TIMEOUT_MS = 600_000
 const CONTRACT_TIMEOUT_MS = 30_000
 /** How long exiting waits for Delta to record a release. */
 const RELEASE_TIMEOUT_MS = 5_000
+/** How often an offered hand-off is checked; the claiming session is another process. */
+const HANDOFF_POLL_MS = 2_000
 /** The band's animation: one braille cycle, redrawn within the engine's per-site throttle. */
 const SPINNER_INTERVAL_MS = 120
 /** How long a finished share or join stays in the band before clearing. */
@@ -100,6 +109,8 @@ let drainTask: Promise<void> | undefined
 let gate: Promise<void> | undefined
 let inFlight = 0
 let quiet: (() => void) | undefined
+/** The plugin's folder under Claude's configuration, shared by every Claude process on the machine. */
+let pluginData = ''
 let outbox = ''
 let joining: JoinRequest | undefined
 let sharing: ShareRequest | undefined
@@ -171,6 +182,15 @@ type SessionState = {
   heldRows?: HeldRow[]
   /** A joined session's mounts were confirmed in this process, and Claude was put in their directory. */
   mounted?: true
+  /** A hand-off this Desktop tab offered, until a new session claims it or it expires. */
+  offered?: Handoff
+  /** A session that started in a hand-off's folder, joining it before its first prompt. */
+  handoffClaim?: Promise<void>
+  /**
+   * The hand-off's opening line, turned into a one-word turn that is left out of the thread:
+   * entering until its turn starts, then that turn's ID.
+   */
+  localTurn?: { turnId?: string }
   /** Mounts are being restored for a resumed session; prompts wait. */
   restoring?: true
   /** Where Claude has to move between turns, because its worktree is no longer the thread's one directory. */
@@ -1077,6 +1097,11 @@ function serial<T>(task: () => Promise<T>): Promise<T> {
   return running
 }
 
+/** Whether `turnId` is the hand-off's one-word turn, which the thread never records. */
+function isLocalTurn(runtime: SessionState, turnId: string): boolean {
+  return runtime.localTurn?.turnId === turnId
+}
+
 /**
  * The turn a row of Claude's own output belongs to, or undefined while that turn's start is not
  * yet staged. `turn.start` writes a turn's scoped running record and is the only thing that
@@ -1899,7 +1924,7 @@ async function join($: Runtime, request: JoinRequest) {
       await completeJoin($, fresh, plan, request)
       return
     }
-    let status = pending.joined ? await readThreadStatus($, request.locator, request.session) : undefined
+    let status = pending.joined ? await readJoinStatus($, request) : undefined
     await assertJoinSession($, request.session, request)
     if (pending.joined && status?.thread_id === pending.thread) {
       // Resolve aliases by canonical identity; never replace this producer with an empty frontier.
@@ -1928,11 +1953,15 @@ async function join($: Runtime, request: JoinRequest) {
       finishProgress($, 'Joined the shared thread', 'done')
       return
     }
+    // Claude Code Desktop has no `/cd`, applies its own folder tool's move only when a model turn
+    // ends, which a join run from a command never has, and never moves a worktree session at all.
+    // So a Desktop join starts a new session in the thread's folder instead.
+    const handsOff = (await $.session.surfaces()).includes('desktop')
     // `/delta join` is the request, and the fresh session leaves this one resumable, so the only
     // question is Claude's own folder trust prompt.
-    await requireJoinCommands($, ['clear', 'cd'])
+    if (!handsOff) await requireJoinCommands($, ['clear', 'cd'])
     await assertJoinSession($, request.session, request)
-    status ??= await readThreadStatus($, request.locator, request.session)
+    status ??= await readJoinStatus($, request)
     await assertJoinSession($, request.session, request)
     if (joinPreflight(status) === 'access')
       throw new Error('Joining requires authenticated access to an already shared thread; check your Delta sign-in and link')
@@ -1940,6 +1969,12 @@ async function join($: Runtime, request: JoinRequest) {
     // could never satisfy, while the old session is still untouched.
     if (joinPreflight(status) === 'empty')
       throw new Error('This thread has no worktree to join')
+    if (handsOff) {
+      const handoff = await pendingHandoff($, request.cwd)
+      if (handoff?.thread === status.thread_id) await takeOverHandoff($, request, handoff)
+      else await offerHandoff($, request, status)
+      return
+    }
     plan = { session: request.session, cwd: request.cwd, locator: request.locator, thread: status.thread_id }
     if (await $.session.id() !== request.session || await $.session.cwd() !== request.cwd)
       throw new Error('The session or folder changed during the access check; nothing was changed')
@@ -1981,6 +2016,29 @@ async function join($: Runtime, request: JoinRequest) {
   }
 }
 
+/** How long a join waits out failures Delta marks retryable, such as a daemon still connecting. */
+const JOIN_RETRY_BUDGET_MS = 30_000
+
+/**
+ * Reads the thread's status for a join, retrying failures Delta marks retryable.
+ *
+ * A join often runs right after the session starts, when Delta's daemon may still be connecting
+ * and answers `disconnected`; a person waiting on the join should not have to retry that.
+ */
+async function readJoinStatus($: Runtime, request: JoinRequest) {
+  const deadline = await $.clock.now() + JOIN_RETRY_BUDGET_MS
+  for (let attempt = 0; ; attempt++) {
+    try { return await readThreadStatus($, request.locator, request.session) }
+    catch (error) {
+      const delay = deliveryRetryDelay(attempt, error instanceof DeltaCommandError ? error.hints.retryAfterMs : undefined)
+      if (classifyCommandFailure(error) !== 'transient' || await $.clock.now() + delay > deadline) throw error
+      setProgress($, 'Waiting for Delta to connect…', 'active')
+      await $.clock.sleep(delay)
+      await assertJoinSession($, request.session, request)
+    }
+  }
+}
+
 async function assertJoinSession($: Runtime, session: string, request: JoinRequest) {
   if (request.cancelled || await $.session.id() !== session)
     throw new Error('The Claude session changed during join; the obsolete transition was stopped')
@@ -2001,7 +2059,7 @@ async function completeJoin($: Runtime, session: string, plan: JoinPlan, request
   const check = () => assertJoinSession($, session, request)
   await check()
   setProgress($, "Mounting the thread's worktrees…", 'active')
-  const mounted = await mountThread($, { session, thread: plan.thread, locator: plan.locator })
+  const mounted = await mountThread($, { session, thread: plan.thread, locator: plan.locator, owner: plan.owner })
   await check()
   requireMounted(mounted, plan.thread)
   // Remember the verified destination even if Claude refuses /cd; the retry notice must name it.
@@ -2012,7 +2070,7 @@ async function completeJoin($: Runtime, session: string, plan: JoinPlan, request
   await enterDirectory($, session, mounted.directory, check)
   const binding: Binding = {
     session, thread: plan.thread, locator: plan.locator, joined: true,
-    owner: session, directory: mounted.directory, mounts: mounted.worktrees,
+    owner: plan.owner ?? session, directory: mounted.directory, mounts: mounted.worktrees,
     // snapshot means live recording is enabled, not that old history must be exported.
     snapshot: true, next: 1, pending: [],
   }
@@ -2031,18 +2089,138 @@ async function completeJoin($: Runtime, session: string, plan: JoinPlan, request
   await check()
   await startConversation($, session)
   // The band reports the join through the finished notice; the way back to the previous session stays in the debug log.
-  $.ui.log(`Joined Delta in fresh Claude session ${session} at ${mounted.directory}. Resume the previous session with claude --resume ${plan.session} from ${plan.cwd}.`, { to: 'debug' })
+  $.ui.log(plan.owner
+    ? `Joined Delta in Claude session ${session} at ${mounted.directory}, taking over mount owner ${plan.owner}.`
+    : `Joined Delta in fresh Claude session ${session} at ${mounted.directory}. Resume the previous session with claude --resume ${plan.session} from ${plan.cwd}.`,
+    { to: 'debug' })
   finishProgress($, 'Joined the shared thread', 'done')
 }
 
-/** Ask Delta to keep the checkout of every worktree of a joined thread mounted for this session. */
+/**
+ * Ask Delta to keep the checkout of every worktree of a joined thread mounted for this session.
+ * `folder` makes even a one-worktree thread's directory its thread folder, which Desktop opens as
+ * a plain folder rather than a repository it would make yet another worktree of.
+ */
 async function mountThread(
-  $: Runtime, binding: { session: string; thread?: string; locator?: string; owner?: string },
+  $: Runtime, binding: { session: string; thread?: string; locator?: string; owner?: string }, folder = false,
 ): Promise<MountedThread> {
   const owner = binding.owner ?? binding.session
+  const args = ['thread', 'mount', binding.locator ?? binding.thread!, '--owner', owner, ...folder ? ['--folder'] : []]
   // A first mount can materialize large checkouts, which the CLI waits for.
-  return parseThreadMount(await readCommand($, ['thread', 'mount', binding.locator ?? binding.thread!, '--owner', owner],
-    'thread mount', new AbortController().signal, MOUNT_TIMEOUT_MS), owner)
+  return parseThreadMount(await readCommand($, args, 'thread mount', new AbortController().signal, MOUNT_TIMEOUT_MS), owner)
+}
+
+function handoffPath(owner: string) { return `${pluginData}/handoffs/${owner}.json` }
+
+/**
+ * Hand a Desktop tab's join to a new Desktop session: mount the thread under an owner of its own,
+ * record the hand-off, and open Desktop's new-session screen on the thread folder. Nothing in this
+ * tab changes.
+ */
+async function offerHandoff($: Runtime, request: JoinRequest, status: ThreadState) {
+  const owner = `desktop-${crypto.randomUUID()}`
+  const check = () => assertJoinSession($, request.session, request)
+  setProgress($, "Mounting the thread's worktrees…", 'active')
+  const single = status.worktrees.status === 'available' && status.worktrees.items.length === 1
+  const mounted = await mountThread($, { session: request.session, thread: status.thread_id, locator: request.locator, owner }, single)
+  const handoff: Handoff = {
+    owner, thread: status.thread_id, locator: request.locator, directory: mounted.directory,
+    created: await $.clock.now(),
+  }
+  try {
+    await check()
+    requireMounted(mounted, status.thread_id)
+    await $.fs.write(handoffPath(owner), JSON.stringify(handoff))
+    const link = newSessionLink(mounted.directory, HANDOFF_PROMPT)
+    const opened = await $.process.run(['open', link], { timeoutMs: RELEASE_TIMEOUT_MS }).catch((error) => ({ exitCode: 1, stderr: String(error) }))
+    stateFor(request.session).offered = handoff
+    const thread = status.title?.trim() ? `“${status.title.trim()}”` : 'the thread'
+    if (opened.exitCode === 0)
+      setProgress($, `Press Enter in the new Claude Code Desktop session to join ${thread} there; this tab stays as it is. Desktop may ask you to trust the thread's folder. It waits 5 minutes.`, 'active')
+    else {
+      // Opening links from a plugin needs macOS's `open`; anywhere else the person opens it.
+      setProgress($, `Open the link in this transcript, then press Enter in the new session to join ${thread} there. It waits 5 minutes.`, 'active')
+      await $.ui.log(`Open this link to start a Claude Code session in the Delta thread's folder: ${link}`, { to: 'transcript' })
+    }
+    $.clock.after(HANDOFF_POLL_MS, () => watchHandoff($, request.session, handoff))
+  } catch (error) {
+    await releaseHandoff($, handoff)
+    throw error
+  }
+}
+
+/** Follow an offered hand-off until a new session claims it, or release it once it expires. */
+async function watchHandoff($: Runtime, session: string, handoff: Handoff) {
+  const runtime = stateFor(session)
+  if (runtime.offered !== handoff) return
+  if (!await $.fs.exists(handoffPath(handoff.owner))) {
+    runtime.offered = undefined
+    finishProgress($, 'Opened the thread in a new session', 'done')
+    return
+  }
+  if (await $.clock.now() - handoff.created < HANDOFF_EXPIRY_MS) {
+    $.clock.after(HANDOFF_POLL_MS, () => watchHandoff($, session, handoff))
+    return
+  }
+  runtime.offered = undefined
+  await releaseHandoff($, handoff)
+  const text = `No session joined the Delta thread within 5 minutes, so Delta released its checkouts. Run /delta join ${handoff.locator} to bring it back.`
+  finishProgress($, text, 'done')
+  await $.ui.log(text, { to: 'transcript' })
+}
+
+/**
+ * Release a hand-off's mount and record. With `onlyUnclaimed`, a record a new session already
+ * removed means that session owns the mount now, and nothing is released.
+ */
+async function releaseHandoff($: Runtime, handoff: Handoff, onlyUnclaimed = false) {
+  if (onlyUnclaimed && !await $.fs.exists(handoffPath(handoff.owner)).catch(() => true)) return
+  await $.process.run(['rm', '-f', '--', handoffPath(handoff.owner)]).catch(() => undefined)
+  await unmountThread($, handoff.locator, handoff.owner)
+}
+
+/** The hand-off offered for a session starting in `directory`, if any. */
+async function pendingHandoff($: Runtime, directory: string): Promise<Handoff | undefined> {
+  const folder = `${pluginData}/handoffs`
+  if (!await $.fs.exists(folder)) return
+  for (const entry of await $.fs.list(folder)) {
+    if (!entry.name.endsWith('.json')) continue
+    let text: string
+    try { text = await $.fs.read(`${folder}/${entry.name}`) as string } catch { continue }
+    const handoff = parseHandoff(text)
+    if (handoff?.directory === directory) return handoff
+  }
+}
+
+/**
+ * Join a hand-off in the session that started in its folder, before the first prompt arrives.
+ * Failure is reported in the band and transcript, and holds prompts until /delta join is retried.
+ */
+async function claimHandoff($: Runtime, session: string, handoff: Handoff) {
+  const request: JoinRequest = { session, cwd: handoff.directory, locator: handoff.locator }
+  try {
+    setProgress($, 'Joining the shared thread…', 'active')
+    await requireContract($, session)
+    await takeOverHandoff($, request, handoff)
+  } catch (error) {
+    if (request.cancelled) return
+    const text = `Delta couldn't join the thread in this session: ${String(error)}. Run /delta join ${handoff.locator} to retry.`
+    stateFor(session).joinFailure = text
+    setProgress($, text, 'error')
+    await $.ui.log(text, { to: 'transcript' })
+  }
+}
+
+/**
+ * Join in the session a hand-off started in the thread's folder: claim the record first, so the
+ * offering tab's expiry cannot release the mount, then take the mount over under the same owner
+ * and join without clearing or moving.
+ */
+async function takeOverHandoff($: Runtime, request: JoinRequest, handoff: Handoff) {
+  await $.process.run(['rm', '-f', '--', handoffPath(handoff.owner)])
+  await completeJoin($, request.session, {
+    session: request.session, cwd: request.cwd, locator: handoff.locator, thread: handoff.thread, owner: handoff.owner,
+  }, request)
 }
 
 /** What a mount that joining or restoring can use: the right thread, and something to work in. */
@@ -2132,8 +2310,13 @@ async function releaseMounts($: Runtime, session: string) {
   try { binding = await $.store.get(key(session)) as Binding | undefined }
   catch { return }
   if (!binding?.joined || binding.session !== session || !binding.thread) return
+  await unmountThread($, binding.locator ?? binding.thread, binding.owner ?? session)
+}
+
+/** Ask Delta to release `owner`'s mounts of `thread`; a failure is only logged, since exiting cannot wait on it. */
+async function unmountThread($: Runtime, thread: string, owner: string) {
   try {
-    const argv = [await resolveCli($), '--json', 'thread', 'unmount', binding.locator ?? binding.thread, '--owner', binding.owner ?? session]
+    const argv = [await resolveCli($), '--json', 'thread', 'unmount', thread, '--owner', owner]
     const result = await $.process.run(argv, { timeoutMs: RELEASE_TIMEOUT_MS })
     if (result.exitCode !== 0) await $.ui.log(`Delta thread unmount failed: ${result.stderr.trim() || result.stdout.trim()}`, { to: 'debug' })
   } catch (error) { await $.ui.log(`Delta thread unmount did not run: ${String(error)}`, { to: 'debug' }) }
@@ -2248,7 +2431,8 @@ async function activate($: Runtime, session: string, isCurrent = () => true) {
     const config = await $.env.get('CLAUDE_CONFIG_DIR') ?? (home ? `${home}/.claude` : undefined)
     if (!ownsActivation()) return
     if (!config) throw new Error('Cannot locate Claude configuration; set CLAUDE_CONFIG_DIR.')
-    outbox = `${config}/delta-plugin/outbox`
+    pluginData = `${config}/delta-plugin`
+    outbox = `${pluginData}/outbox`
     if (active !== session) await stopConversation()
     if (!ownsActivation()) return
     active = session
@@ -2260,6 +2444,15 @@ async function activate($: Runtime, session: string, isCurrent = () => true) {
     if (binding.joinTransition) {
       await report($, new Error(`The join directory transition is incomplete. Run /delta join ${binding.joinTransition.locator} to retry the saved mount${binding.directory ? ` at ${binding.directory}` : ''}; prompts remain blocked.`))
       return
+    }
+    // A session Desktop started in a hand-off's folder joins it before its first prompt.
+    if (!binding.snapshot && !binding.joined && !runtime.handoffClaim) {
+      const handoff = await pendingHandoff($, await $.session.cwd())
+      if (!ownsActivation()) return
+      if (handoff) {
+        runtime.handoffClaim = claimHandoff($, session, handoff)
+        return
+      }
     }
     endDeliveryFailures(runtime)
     scheduleOutboxCleanup($, binding)
@@ -2294,6 +2487,19 @@ async function activate($: Runtime, session: string, isCurrent = () => true) {
 
 export function register(on: On) {
   on('prompt.submit', async ($, e, next) => {
+    // A hand-off's opening line only started this session, which has joined by now. It becomes a
+    // one-word turn that the thread never records, rather than a message to the thread or a
+    // dropped prompt Desktop would show as blocked.
+    const opening = stateFor(await $.session.id())
+    if (opening.handoffClaim) {
+      const claim = opening.handoffClaim
+      await claim
+      if (opening.handoffClaim === claim) opening.handoffClaim = undefined
+      if (!opening.joinFailure && !e.turnId && e.text.trim() === HANDOFF_PROMPT) {
+        opening.localTurn = {}
+        return next({ ...e, text: HANDOFF_ACKNOWLEDGEMENT })
+      }
+    }
     const operation = promptGate({ joining: !!joining, sharing: !!sharing })
     if (operation === 'joining') return { drop: 'Delta is joining in a fresh session. Wait for the join result before submitting a prompt.' }
     if (operation === 'sharing') return { drop: 'Delta is sharing this session. Wait for the share result before submitting a prompt.' }
@@ -2366,7 +2572,8 @@ export function register(on: On) {
     const session = await $.session.id()
     const runtime = stateFor(session)
     runtime.currentTurnId = e.turnId
-    if (!runtime.binding?.snapshot) return next(e)
+    if (runtime.localTurn && !runtime.localTurn.turnId) runtime.localTurn.turnId = e.turnId
+    if (!runtime.binding?.snapshot || isLocalTurn(runtime, e.turnId)) return next(e)
     try {
       await beginExecution($, session, e.turnId)
       if (isPaused(runtime) || runtime.captureFailure || feed.session !== session || feed.connection !== 'live')
@@ -2388,6 +2595,7 @@ export function register(on: On) {
     const sequence = runtime.nativeTurns.get(e.turnId) ??
       (runtime.binding?.execution?.turnId === e.turnId ? runtime.binding.execution.sequence : undefined)
     if (runtime.currentTurnId === e.turnId) runtime.currentTurnId = undefined
+    if (isLocalTurn(runtime, e.turnId)) runtime.localTurn = undefined
     runtime.promptEntering = false
     runtime.nativeTurns.delete(e.turnId)
     const result = await next(e)
@@ -2569,6 +2777,10 @@ export function register(on: On) {
     // Exiting ends the session's use of its checkouts. A clear is the join's own transition and a
     // resume only switches sessions, so neither releases them.
     if (releasesMounts(e.reason)) await releaseMounts($, e.sessionId)
+    // An offered hand-off nobody opened goes with the tab that offered it.
+    const offered = runtime.offered
+    runtime.offered = undefined
+    if (offered && releasesMounts(e.reason)) await releaseHandoff($, offered, true)
     return next(e)
   })
 
@@ -2583,8 +2795,15 @@ export function register(on: On) {
   on('session.start', async ($, e, next) => {
     await $.command.register({ name: 'delta', description: 'Share or join a Delta conversation', argumentHint: 'share | join <shared-link-or-thread>' })
     const result = await next(e)
-    try { await activate($, await $.session.id()) }
+    const session = await $.session.id()
+    try { await activate($, session) }
     catch (error) { await report($, error) }
+    // Claude delivers the first prompt only after this hook returns, so a session started for a
+    // hand-off finishes joining here, and its opening line meets a joined session. Waiting in
+    // `prompt.submit` instead would count the join against that hook's 10-second budget, while
+    // the Delta commands the join runs here are `$` calls, which that budget never counts. The
+    // claim reports its own failure.
+    await stateFor(session).handoffClaim
     return result
   })
 
@@ -2671,6 +2890,8 @@ export function register(on: On) {
     if (!capturedMessage(e.message, e.door)) return next(e)
     const session = await $.session.id()
     const runtime = stateFor(session)
+    // The hand-off's one-word turn, its prompt included, stays out of the thread.
+    if (runtime.localTurn) return next(e)
     // A composer prompt is this person's own input. Its turn's start record is
     // only written at turn.start, after this row, so the row is held to be
     // recorded under that turn; a prompt sent into a running turn names it now.
@@ -2724,6 +2945,7 @@ export function register(on: On) {
     if (e.agentId !== undefined) return next(e)
     const session = await $.session.id()
     const runtime = stateFor(session)
+    if (runtime.localTurn) return next(e)
     // The turn this call belongs to is fixed now, so a later result row keeps it even after the
     // turn ends. While Claude runs a turn whose scoped start is not yet written, the call waits
     // for that start so it does not name the turn before it.

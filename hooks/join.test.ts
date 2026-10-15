@@ -1,7 +1,8 @@
 import { describe, expect, test as kitTest, tier, type Engine } from 'claude-code/testing'
-import { CHECKOUT, FOLDERS, LIVE, MOUNTS, abovePrompt, bash, fakeThreads, prompt, remoteItem, sessionEnd, sessionStart, shareCommand, testsWithHeldClockWait, turnComplete, turnStart } from './fake-thread-commands'
+import { CHECKOUT, CONFIG, FOLDERS, LIVE, MOUNTS, abovePrompt, bash, fakeThreads, prompt, remoteItem, sessionEnd, sessionStart, shareCommand, testsWithHeldClockWait, turnComplete, turnStart } from './fake-thread-commands'
 import { itemFingerprint } from './conversation'
 import { cliFixture } from './cli-fixtures'
+import { HANDOFF_ACKNOWLEDGEMENT, HANDOFF_EXPIRY_MS, HANDOFF_PROMPT, newSessionLink } from './handoff'
 
 tier('user')
 
@@ -20,6 +21,36 @@ describe('joining', () => {
     const text = fake.logs.join('\n')
     expect(text).toContain("Use the thread's share link with /delta join")
     expect(text).not.toContain(`Retry /delta join ${address}`)
+    expect(fake.session).toBe(previousSession)
+    expect(fake.sessionCommands).toEqual([])
+    await $.session.end(sessionEnd(fake.session))
+  })
+
+  test('a join waits out a Delta daemon that is still connecting', async ($, on) => {
+    const fake = sharedThread(on, $)
+    const previousSession = fake.session
+    fake.commandFault = { operation: 'status', code: 'failed', reason: 'remote', message: 'disconnected', retryable: true }
+    await $.session.start(sessionStart)
+    await $.command.run({ ...shareCommand, args: `join ${link(fake)}` })
+    await finishJoin(fake)
+    expect(await bandText($)).toContain('Waiting for Delta to connect')
+    expect(fake.session).toBe(previousSession)
+    fake.commandFault = undefined
+    await fake.clock.advance(2000)
+    expect(fake.session).not.toBe(previousSession)
+    expect(fake.store.get(`session:${fake.session}`)).toMatchObject({ thread: fake.threadId, joined: true })
+    await $.session.end(sessionEnd(fake.session))
+  })
+
+  test('a join stops waiting for Delta after its retry budget and leaves the session as it was', async ($, on) => {
+    const fake = sharedThread(on, $)
+    const previousSession = fake.session
+    fake.commandFault = { operation: 'status', code: 'failed', reason: 'remote', message: 'disconnected', retryable: true }
+    await $.session.start(sessionStart)
+    await $.command.run({ ...shareCommand, args: `join ${link(fake)}` })
+    await finishJoin(fake)
+    for (const wait of [2000, 4000, 8000, 16_000]) await fake.clock.advance(wait)
+    expect(fake.logs.join('\n')).toContain('disconnected. The previous session and folder were preserved.')
     expect(fake.session).toBe(previousSession)
     expect(fake.sessionCommands).toEqual([])
     await $.session.end(sessionEnd(fake.session))
@@ -75,6 +106,97 @@ describe('joining', () => {
       expect(argv[4]).toBe(link(fake))
     fake.expectClean()
     await $.session.end(sessionEnd(fake.session))
+  })
+
+  test("a Desktop tab hands the join to a new session in the thread's folder, changing nothing here", async ($, on) => {
+    const fake = desktopTab(on, $)
+    const before = fake.session
+    const offer = await offerFromDesktopTab($, fake)
+    expect(fake.session).toBe(before)
+    expect(fake.sessionCommands).toEqual([])
+    // A one-worktree thread asks for its thread folder, which Desktop opens as a plain folder.
+    expect(fake.mountRequests).toEqual([{ owner: offer.owner, folder: true }])
+    expect(fake.opened).toEqual([newSessionLink(offer.folder, HANDOFF_PROMPT)])
+    expect(JSON.parse(fake.files.get(offer.record)!)).toMatchObject({
+      owner: offer.owner, thread: fake.threadId, locator: link(fake), directory: offer.folder,
+    })
+    expect(await bandText($)).toContain('Press Enter in the new Claude Code Desktop session to join “Fix the parser”')
+    expect(fake.watches.length).toBe(0)
+    expect(fake.unmounts).toEqual([])
+    fake.expectClean()
+    await $.session.end(sessionEnd(fake.session))
+  })
+
+  test("the session started in the thread's folder joins before its opening line, which becomes a one-word turn the thread never records", async ($, on) => {
+    const fake = desktopTab(on, $)
+    const offer = await offerFromDesktopTab($, fake)
+    await startInThreadFolder($, fake, offer.folder)
+    // Claude delivers the first prompt once session.start returns, so the join is done by then.
+    expect(fake.store.get('session:opened-from-link')).toMatchObject({
+      joined: true, snapshot: true, owner: offer.owner, directory: offer.folder, locator: link(fake),
+    })
+    // The session takes the mount over under the same owner; nothing clears or moves.
+    expect(fake.mountRequests.at(-1)).toEqual({ owner: offer.owner, folder: false })
+    expect(fake.files.has(offer.record)).toBe(false)
+    expect(fake.sessionCommands).toEqual([])
+    expect(await bandText($)).toContain(LIVE)
+    expect((await $.prompt.submit(prompt(HANDOFF_PROMPT))).drop).toBeUndefined()
+    expect(fake.entered.at(-1)?.text).toBe(HANDOFF_ACKNOWLEDGEMENT)
+    await oneTurn($, 'opening', HANDOFF_ACKNOWLEDGEMENT, 'Joined.')
+    await fake.clock.advance(0)
+    expect(fake.records()).toEqual([])
+    // The person's next prompt is theirs, and the thread records it as usual.
+    expect((await $.prompt.submit(prompt('What is left on the parser?'))).drop).toBeUndefined()
+    expect(fake.entered.at(-1)?.text).toBe('What is left on the parser?')
+    await oneTurn($, 'second', 'What is left on the parser?', 'The tests.')
+    await fake.clock.advance(0)
+    expect(fake.records().length).toBeGreaterThan(0)
+    expect(JSON.stringify(fake.records())).not.toContain('Joined.')
+    // The offering tab sees the record claimed and stops offering; nothing is released.
+    await fake.clock.advance(2_000)
+    expect(fake.unmounts).toEqual([])
+    fake.expectClean()
+    await $.session.end(sessionEnd(fake.session))
+  })
+
+  test('an opening line the person changed before sending goes to Claude and the thread as they wrote it', async ($, on) => {
+    const fake = desktopTab(on, $)
+    const offer = await offerFromDesktopTab($, fake)
+    await startInThreadFolder($, fake, offer.folder)
+    expect((await $.prompt.submit(prompt('Join this Delta thread and summarize it.'))).drop).toBeUndefined()
+    expect(fake.entered.at(-1)?.text).toBe('Join this Delta thread and summarize it.')
+    await $.session.end(sessionEnd(fake.session))
+  })
+
+  test('where the plugin cannot open the link itself, the transcript carries it for the person to open', async ($, on) => {
+    const fake = desktopTab(on, $)
+    fake.failOpen = true
+    const offer = await offerFromDesktopTab($, fake)
+    expect(fake.logs.join('\n')).toContain(newSessionLink(offer.folder, HANDOFF_PROMPT))
+    expect(await bandText($)).toContain('Open the link in this transcript')
+    expect(fake.unmounts).toEqual([])
+    await $.session.end(sessionEnd(fake.session))
+  })
+
+  test('a hand-off no session joins within 5 minutes is released, saying how to bring it back', async ($, on) => {
+    const fake = desktopTab(on, $)
+    const offer = await offerFromDesktopTab($, fake)
+    await fake.clock.advance(HANDOFF_EXPIRY_MS + 2_000)
+    expect(fake.unmounts).toEqual([{ thread: fake.threadId, owner: offer.owner }])
+    expect(fake.files.has(offer.record)).toBe(false)
+    const text = fake.logs.join('\n')
+    expect(text).toContain('No session joined the Delta thread within 5 minutes')
+    expect(text).toContain(`Run /delta join ${link(fake)} to bring it back`)
+    fake.expectClean()
+    await $.session.end(sessionEnd(fake.session))
+  })
+
+  test('the offering tab exiting releases a hand-off no session joined', async ($, on) => {
+    const fake = desktopTab(on, $)
+    const offer = await offerFromDesktopTab($, fake)
+    await $.session.end({ ...sessionEnd(fake.session), reason: 'prompt_input_exit' })
+    expect(fake.unmounts).toEqual([{ thread: fake.threadId, owner: offer.owner }])
+    expect(fake.files.has(offer.record)).toBe(false)
   })
 
   test("Claude's own cd below the joined directory keeps participating, and leaving it pauses", async ($, on) => {
@@ -665,6 +787,47 @@ function scriptMounts(fake: ReturnType<typeof fakeThreads>, names: string[], dir
 }
 
 function link(fake: ReturnType<typeof fakeThreads>) { return `https://delta.dev/join/${fake.shareId}` }
+
+/** A Desktop Code tab, worktree or not, joining a thread Delta titles "Fix the parser". */
+function desktopTab(on: Parameters<typeof fakeThreads>[0], engine: Engine) {
+  const fake = sharedThread(on, engine)
+  desktopHost(fake)
+  fake.statusPatch = { title: 'Fix the parser' }
+  scriptMounts(fake, ['delta'], (owner) => owner.startsWith('desktop-') ? `${FOLDERS}/${owner}` : `${MOUNTS}/${owner}/delta`)
+  return fake
+}
+
+/** Run `/delta join` in a Desktop tab and return the hand-off it offered. */
+async function offerFromDesktopTab($: Engine, fake: ReturnType<typeof fakeThreads>) {
+  await $.session.start({ ...sessionStart, surface: 'desktop' })
+  await $.command.run({ ...shareCommand, args: `join ${link(fake)}` })
+  await finishJoin(fake)
+  const owner = fake.mountRequests[0]!.owner
+  expect(owner).toMatch(/^desktop-/)
+  return { owner, folder: `${FOLDERS}/${owner}`, record: `${CONFIG}/delta-plugin/handoffs/${owner}.json` }
+}
+
+/** The session Desktop starts in the thread folder from the link, once the opening line is sent. */
+async function startInThreadFolder($: Engine, fake: ReturnType<typeof fakeThreads>, folder: string) {
+  fake.session = 'opened-from-link'
+  fake.cwd = folder
+  await $.session.start({ ...sessionStart, surface: 'desktop', cwd: folder })
+}
+
+/** One Claude turn as the engine runs it: the prompt's row, the turn, the reply's row. */
+async function oneTurn($: Engine, turnId: string, text: string, answer: string) {
+  await $.turn.start(turnStart(turnId, text))
+  await $.session.append({ door: 'prompt', uuid: `${turnId}-prompt`, message: { type: 'user', role: 'user', content: text } } as never)
+  await $.session.append({ door: 'response', uuid: `${turnId}-answer`,
+    message: { type: 'assistant', role: 'assistant', content: [{ type: 'text', text: answer }] } } as never)
+  await $.turn.complete({ ...turnComplete(turnId), answer })
+}
+
+/** Claude Code Desktop, which has no `/cd`. */
+function desktopHost(fake: ReturnType<typeof fakeThreads>) {
+  fake.surfaces = ['desktop']
+  fake.builtins = ['clear']
+}
 
 /** The status band as JSON text, which is how a test reads what it draws. */
 async function bandText($: Engine) {

@@ -212,6 +212,12 @@ export function fakeThreads(on: On, options: {
     sessionCommands: [] as { command: string; args: string }[],
     refuseClear: false,
     refuseCd: false,
+    /** Every link the plugin opened with `open`, such as Desktop's new-session link. */
+    opened: [] as string[],
+    /** `open` fails, as it does where there is no macOS `open` to run. */
+    failOpen: false,
+    /** Each `thread mount` the plugin asked for, by owner, and whether it asked for the thread folder. */
+    mountRequests: [] as { owner: string; folder: boolean }[],
     holdCommandListFor: undefined as ((session: string) => Promise<void> | undefined) | undefined,
     root: undefined as string | undefined,
     agents: [] as { id: string; description: string; type: string; status: string }[],
@@ -592,11 +598,16 @@ export function fakeThreads(on: On, options: {
     fake.commands.push(argv)
     if (argv[0] === 'git') return fake.failGit ? output('', 128, 'not a git repository') : output(`${CHECKOUT}\n`)
     if (argv[0] === 'pwd') return output(`${(e as any).init?.cwd ?? CONFIG}\n`)
+    if (argv[0] === 'open') {
+      if (fake.failOpen) return output('', 1, 'open: command not found')
+      fake.opened.push(argv[1]!)
+      return output('')
+    }
     if (argv[0] === 'rm') {
       if (fake.failRemoval) return output('', 1, 'removal denied')
       for (const path of argv.slice(3)) {
         const sequence = Number(/\/([0-9]+)-[0-9]+\.json$/.exec(path)?.[1])
-        if (!(sequence < fake.server.next)) fake.violations.push(`deleted an unsynchronized record: ${path}`)
+        if (path.includes('/outbox/') && !(sequence < fake.server.next)) fake.violations.push(`deleted an unsynchronized record: ${path}`)
         fake.files.delete(path)
       }
       return output('')
@@ -604,7 +615,8 @@ export function fakeThreads(on: On, options: {
     const runHold = await fake.holdRun?.(operation)
     if (runHold) await runHold
     if (operation === 'unmount') {
-      if (!matchesCommand(argv, ['thread', 'unmount', threadLocator(parsed!.positionals[2])], { '--owner': fake.session }))
+      const owner = String(parsed?.options['--owner'])
+      if (!matchesCommand(argv, ['thread', 'unmount', threadLocator(parsed!.positionals[2])], { '--owner': ownerOf(owner) }))
         fake.violations.push(`unexpected unmount arguments ${argv}`)
       fake.unmounts.push({ thread: fake.server.thread!, owner: String(parsed!.options['--owner']) })
       fake.server.groups.delete(String(parsed!.options['--owner']))
@@ -670,7 +682,12 @@ export function fakeThreads(on: On, options: {
     const operation = cliArguments(e.argv)?.positionals[1]
     if (operation === 'mount') {
       fake.commands.push([...e.argv])
-      if (!matchesCommand(e.argv, ['thread', 'mount', threadLocator(cliArguments(e.argv)?.positionals[2])], { '--owner': fake.session }))
+      const parsed = cliArguments(e.argv)
+      const owner = String(parsed?.options['--owner'])
+      const folder = parsed?.options['--folder'] === true
+      fake.mountRequests.push({ owner, folder })
+      if (!matchesCommand(e.argv, ['thread', 'mount', threadLocator(parsed?.positionals[2])],
+        { '--owner': ownerOf(owner), ...folder ? { '--folder': true as any } : {} }))
         fake.violations.push(`unexpected mount arguments: ${e.argv.join(' ')}`)
       const hold = await fake.holdRun?.(operation)
       if (hold) await hold
@@ -683,8 +700,8 @@ export function fakeThreads(on: On, options: {
         yield { stream: 'stdout', text: JSON.stringify(cliFixture('error', { error: { code: 'not_visible', reason: 'thread_gone', message: 'no such thread', retryable: false } })) }
         return { value: { code: 2, signal: null } }
       }
-      const mounted = fake.mountReply?.(fake.session) ?? cliFixture('mount', { thread_id: fake.server.thread, owner: fake.session })
-      fake.server.groups.set(fake.session, {
+      const mounted = fake.mountReply?.(owner) ?? cliFixture('mount', { thread_id: fake.server.thread, owner })
+      fake.server.groups.set(owner, {
         directory: mounted.directory,
         mounts: new Map(mounted.worktrees.map((tree: any) => [
           tree.reference, { name: tree.name, directory: tree.directory, active: true },
@@ -752,6 +769,11 @@ export function fakeThreads(on: On, options: {
   function urlOf() {
     const fixture = cliFixture('share')
     return fixture.url.replace(fixture.share_id, fake.shareId)
+  }
+
+  /** The session owns its mounts; a Desktop hand-off mounts under an owner of its own. */
+  function ownerOf(owner: string) {
+    return owner.startsWith('desktop-') ? owner : fake.session
   }
 
   function threadLocator(value: string | undefined) {
@@ -882,7 +904,7 @@ function cliArguments(argv: readonly string[]) {
     const argument = argv[index]!
     if (!argument.startsWith('--')) { positionals.push(argument); continue }
     if (Object.hasOwn(options, argument)) return undefined
-    if (argument === '--json') { options[argument] = true; continue }
+    if (argument === '--json' || argument === '--folder') { options[argument] = true; continue }
     if (!['--source', '--external-id', '--thread', '--visibility', '--owner', '--owner-pid'].includes(argument)) return undefined
     const value = argv[++index]
     if (value === undefined || value.startsWith('--')) return undefined

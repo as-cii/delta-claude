@@ -105,7 +105,40 @@ actual built-in `/clear` and `/cd` commands, rather than inferring their availab
 from the surface, and that the thread has at least one worktree.
 Claude asks whether to trust the new directory, and the plugin first explains that
 prompt in the transcript: choose **Yes, move here** to finish joining. Declining
-leaves the transition paused and recoverable.
+leaves the transition paused and recoverable. Claude Code Desktop has no `/cd`, so a
+Desktop join starts a new session instead (below).
+
+### Joining from Claude Code Desktop
+
+Desktop's own folder tool applies a move only when a model turn ends, which a join run
+from `/delta join` never has, and Desktop never moves a session that runs in a worktree
+it set up. So a join from any Desktop Code tab, worktree or not, opens the thread in a
+new session, and the tab itself stays as it is:
+
+1. The tab mounts the thread under an owner of its own, `desktop-<uuid>`, passing
+   `--folder` for a one-worktree thread. Desktop opens a Git checkout as a project and would
+   make yet another worktree of it, but opens a thread folder, which is not a repository, as
+   a plain folder.
+2. It records the hand-off in `delta-plugin/handoffs/<owner>.json` under Claude's
+   configuration, where every Claude process on the machine can read it, and opens
+   `claude://code/new?folder=<thread folder>&q=Join this Delta thread.`, the link Finder's
+   "New Claude Code Session Here" uses. Desktop shows its new-session screen on that folder
+   with the line filled in, and may ask the person to trust the folder; the folder is not a
+   Git repository, so the session gets no worktree of its own. Where `open` cannot run, the
+   transcript carries the link instead. The person sends the line themselves, because
+   Desktop's own session tools (`spawn_task`, `start_session`) refuse a session a plugin
+   starts. The line is not `/delta join`, because Desktop breaks a command a link fills in
+   (`/ delta`).
+3. Sending the line starts the session. Within `session.start`, which Claude waits for
+   before the first prompt, the plugin finds the record for the session's folder, removes
+   it, mounts again under the same owner so Delta follows its own Claude process from then
+   on, and joins without clearing or moving. The line, sent unchanged, then becomes a
+   one-word turn ("Joined.") that is left out of the thread; dropping it instead would show
+   as blocked. An edited line is the person's own message. `/delta join` typed in that
+   folder joins the same way.
+4. A hand-off no session joins within five minutes is released: its checkouts are
+   released, and the tab says to run `/delta join <link>` again to bring it back. The tab
+   exiting releases it too.
 
 A thread can have any number of worktrees. Joining clears Claude into a new session,
 then asks Delta to mount every worktree for that session with
@@ -582,8 +615,10 @@ mounts, the prompt gate naming an unmounted worktree, live worktree changes incl
 the move to the thread folder, unmounting on exit for each counted reason and not for
 `clear` or `resume`, resume from another directory, no export or automatic execution,
 mount and directory-transition retries, same-thread recovery with pending producer
-records, cancellation, running agents, terminal/Desktop orchestration and hosts without
-an interactive surface or required built-in commands. The fixture's `thread mount`,
+records, cancellation, running agents, terminal/Desktop orchestration, the Desktop
+hand-off (the offer, the in-place join and unrecorded opening turn in the new session, an
+edited opening line, a link the plugin cannot open, expiry and the offering tab exiting),
+and hosts without an interactive surface or required built-in commands. The fixture's `thread mount`,
 `thread unmount` and `worktrees` event follow `docs/thread-mounts.md`; they are not a
 real Delta daemon, and these are host fixtures, not real Desktop workflow verification. `python3 scripts/check-session-transition.py` probes installed Claude's
 idle `/clear` and `/cd` behavior without a model request. Against a matching native
@@ -614,15 +649,17 @@ checkout with a real upstream remote, with a second Delta client on the same thr
    link becomes clickable; press Enter with the band focused (ctrl+x tab) or click "copy link"
    and paste it;
    repeat `/delta share` to recover it without importing history again.
-   In a separate idle Code tab, `/delta join <link>` also reports in the band at once and
-   walks through checking access, a fresh session, mounting, the
-   directory trust prompt and connecting, then shows "Joined"; it creates a fresh Claude
-   session, mounts every worktree of the thread, and changes both cwd and project root
-   to the worktree's checkout or, for several, the thread folder. Repeat join: the
-   session, mounts and producer sequence stay unchanged while the band reports the
-   rejoin. Decline the directory trust prompt once, then retry the original join link
-   to finish without another clear. Exit Claude, resume the session from another
-   directory: the band shows the worktrees being restored and Claude moves back.
+   In a separate Code tab, worktree or not, `/delta join <link>` reports in the band at
+   once, mounts the thread, leaves the tab as it is and opens Desktop's new-session
+   screen on the thread folder with "Join this Delta thread." filled in. Trust the folder
+   if Desktop asks, then press Enter: the new session joins in place, its cwd and project
+   root are the thread folder, and it answers "Joined.", which the other client never
+   sees; the offering tab's band reads "Opened the thread in a new session". Repeat
+   `/delta join <link>` in the new session: the session, mounts and producer sequence stay
+   unchanged while the band reports the rejoin. Offer again and send nothing for five
+   minutes: the tab says the checkouts were released and how to bring the thread back.
+   Exit the joined session and resume it: the band shows the worktrees being restored
+   in the thread folder.
 2. With Claude idle, send a message from the other client: no Claude turn starts, and
    the transcript draws its author in bold over the message's markdown, under the echo
    of the command that drew it (`/delta show <item-id>`).
