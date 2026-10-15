@@ -630,14 +630,15 @@ describe('setup dialogs and notices', () => {
     const fake = fakeThreads(on)
     fake.answerQuestion = (question: any) => {
       const text = question.questions[0].question
-      const answer = text.startsWith('Write this Delta policy') ? 'Write it' : 'Private upload'
+      const answer = text.startsWith(`Write ${POLICY}`) ? 'Write it' : 'Private upload'
       return { result: { answers: { [text]: answer } } }
     }
     await $.session.start(sessionStart)
     await $.command.run({ ...typedDelta('setup') } as never)
     expect(JSON.parse(fake.files.get(POLICY)!)).toEqual({ threads: { mode: 'private', organization: 'org-1' } })
-    // The person sees exactly what will be written before confirming it.
-    expect(fake.logs.join('\n')).toContain(`Delta will write ${POLICY}`)
+    // The confirmation names the file, the mode, and the organization by name rather than its id.
+    expect(fake.questions.map((question: any) => question.questions[0].question)).toContain(
+      `Write ${POLICY} with recording set to Private upload, uploading to Zed? It is not committed.`)
     fake.expectClean()
   })
 

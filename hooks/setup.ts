@@ -153,7 +153,8 @@ async function askAndWrite(env: SetupEnv, interaction: Interaction): Promise<Set
   const mode = (Object.keys(MODE_NAMES) as ThreadMode[]).find((candidate) => MODE_NAMES[candidate] === answer)
   if (!mode) return CANCELLED
 
-  let organization: string | undefined
+  let organization: Organization | undefined
+  let target = ''
   if (mode !== 'manual') {
     if ((contract?.max ?? 0) < OFFLINE_CONTRACT_VERSION) {
       await interaction.log(UPDATE_NOTICE, 'transcript')
@@ -167,17 +168,18 @@ async function askAndWrite(env: SetupEnv, interaction: Interaction): Promise<Set
     // Offer the current organization and up to three others; any organization is still reachable by
     // typing its exact name or id, and an unmatched or ambiguous answer asks again.
     const offered = [current, ...organizations.filter((org) => org !== current)].slice(0, MAX_ORGANIZATION_OPTIONS)
-    if (organizations.length === 1) organization = current.id
+    if (organizations.length === 1) organization = current
     while (!organization) {
       organization = matchOrganization(await interaction.ask(
         'Which organization should this checkout upload to? Choose one, or type an exact organization name or id.',
-        { options: offered.map((org) => organizationLabel(org, organizations)), header: 'Organization' }), organizations)?.id
+        { options: offered.map((org) => organizationLabel(org, organizations)), header: 'Organization' }), organizations)
     }
+    target = `, uploading to ${organizationLabel(organization, organizations)}`
   }
 
-  const text = serializeProjectPolicy(file.document, mode, organization)
-  await interaction.log(`Delta will write ${path}:\n${text}`, 'transcript')
-  if (await interaction.ask(`Write this Delta policy to ${path}? It is not committed.`, ['Write it', 'Cancel']) !== 'Write it') return CANCELLED
+  const text = serializeProjectPolicy(file.document, mode, organization?.id)
+  const question = `Write ${path} with recording set to ${MODE_NAMES[mode]}${target}? It is not committed.`
+  if (await interaction.ask(question, ['Write it', 'Cancel']) !== 'Write it') return CANCELLED
 
   try { await env.writeFile(path, text) }
   catch (error) { return { status: 'failed', text: `Delta could not write ${path}: ${String(error)}` } }

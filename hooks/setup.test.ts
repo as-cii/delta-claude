@@ -125,6 +125,19 @@ describe('setup wizard', () => {
     }
   })
 
+  test('the confirmation summarizes the policy instead of logging the file', async () => {
+    const manual = harness({ answers: ['Manual', 'Write it'] })
+    await runSetupWizard(manual.env, manual.interaction)
+    expect(manual.asks.find((ask) => ask.question.startsWith('Write '))!.question).toBe('Write /repo/.delta/settings.json with recording set to Manual? It is not committed.')
+    // A name shared by two organizations is told apart by its id, as in the organization question.
+    const twins = [{ id: 'org-1', name: 'Zed', current: true }, { id: 'org-2', name: 'Zed', current: false }]
+    const shared = harness({ answers: ['Organization sharing', 'Zed (org-2)', 'Write it'], organizations: twins })
+    await runSetupWizard(shared.env, shared.interaction)
+    expect(shared.asks.find((ask) => ask.question.startsWith('Write '))!.question).toBe(
+      'Write /repo/.delta/settings.json with recording set to Organization sharing, uploading to Zed (org-2)? It is not committed.')
+    expect([...manual.logs, ...shared.logs]).toEqual([])
+  })
+
   test('an unavailable question API reports it without writing', async () => {
     const h = harness({ answers: ['__unavailable__'] })
     const outcome = await runSetupWizard(h.env, h.interaction)

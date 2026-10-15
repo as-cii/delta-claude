@@ -2892,7 +2892,12 @@ function claudeInteraction($: Runtime): Interaction {
       const wrapped = answer as { label?: string; value?: string }
       return wrapped.label ?? wrapped.value ?? ''
     },
-    log: async (text, to) => { await $.ui.log(text, to ? { to } : undefined) },
+    log: async (text, to) => {
+      // The transcript flattens an embedded newline to U+FFFD (see `showToPerson`), so a multi-line
+      // message, like the policy file setup previews, goes out one entry per line.
+      if (to !== 'transcript') return await $.ui.log(text, to ? { to } : undefined)
+      for (const line of text.replace(/\n+$/, '').split('\n')) await $.ui.log(line, { to })
+    },
   }
 }
 
