@@ -1,6 +1,7 @@
 import type { EngineInterface } from 'claude-code'
 
 type Run = EngineInterface['process']['run']
+type WindowsDiscovery = Pick<EngineInterface['fs'], 'exists'>
 class MissingCliError extends Error {}
 
 /** Discovery never starts Delta or downloads anything, including during resume. */
@@ -67,7 +68,7 @@ export class DeltaCli {
   private executable?: string
   private pending?: Promise<string>
 
-  async resolve(run: Run, allowInstall = false, progress = (_text: string) => {}, windows = false): Promise<string> {
+  async resolve(run: Run, allowInstall = false, progress = (_text: string) => {}, windows: WindowsDiscovery | false = false): Promise<string> {
     if (this.executable) return this.executable
     if (this.pending) {
       try { return await this.pending }
@@ -87,15 +88,28 @@ export class DeltaCli {
     }
   }
 
-  private async setup(run: Run, allowInstall: boolean, progress: (text: string) => void, windows: boolean): Promise<string> {
+  private async setup(run: Run, allowInstall: boolean, progress: (text: string) => void, windows: WindowsDiscovery | false): Promise<string> {
     if (windows) {
       // Restrict lookup to PATH rather than also searching the current checkout.
       const result = await run(['where.exe', '$PATH:delta.exe'], { timeoutMs: 30_000 })
       if (result.isStdoutTruncated || result.isStderrTruncated) throw new Error('Delta CLI discovery output was truncated; retry.')
       if (result.exitCode === 0) return this.path(result.stdout.trim().split(/\r?\n/)[0]!, true)
-      if (result.exitCode === 1)
-        throw new Error('Delta CLI is missing from PATH. Install Delta for Windows manually from https://delta.dev, add the directory containing delta.exe to PATH, restart Claude Code, and retry /delta share or /delta join <link>. Automatic installation is only available on macOS and Linux.')
-      throw new Error(`Cannot locate Delta CLI: ${result.stderr.trim()}. Check that where.exe is available and delta.exe is on PATH, then retry.`)
+      if (result.exitCode !== 1)
+        throw new Error(`Cannot locate Delta CLI: ${result.stderr.trim()}. Check that where.exe is available and delta.exe is on PATH, then retry.`)
+      for (const hive of ['HKCU', 'HKLM']) {
+        // Delta's installer uses the native 64-bit view, even if the plugin host is 32-bit.
+        const installed = await run(['reg.exe', 'query', `${hive}\\Software\\Zed Industries\\Delta`,
+          '/v', 'InstallFolder', '/reg:64'], { timeoutMs: 30_000 })
+        if (installed.isStdoutTruncated || installed.isStderrTruncated) throw new Error('Delta CLI discovery output was truncated; retry.')
+        if (installed.exitCode !== 0) continue
+        const folder = installed.stdout.match(/^\s*InstallFolder\s+REG_SZ\s+(.+?)\s*$/m)?.[1]
+        if (!folder) continue
+        let candidate: string
+        try { candidate = this.path(`${folder.replace(/[\\/]+$/, '')}\\bin\\delta.exe`, true) }
+        catch { continue }
+        if (await windows.exists(candidate)) return candidate
+      }
+      throw new Error('Delta CLI, install Delta for Windows from https://delta.dev, restart your terminal and Claude Code, and retry /delta share or /delta join <link>.')
     }
     const result = await run(['sh', '-c', discover], { timeoutMs: 30_000 })
     if (result.isStdoutTruncated || result.isStderrTruncated) throw new Error('Delta CLI discovery output was truncated; retry.')

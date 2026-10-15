@@ -1007,7 +1007,8 @@ async function readThreadStatus($: Runtime, thread: string, session: string, sig
 
 async function resolveCli($: Runtime, allowInstall = false) {
   return cli.resolve((argv, init) => $.process.run(argv, init), allowInstall,
-    (text) => setProgress($, text, 'active'), await $.env.get('OS') === 'Windows_NT')
+    (text) => setProgress($, text, 'active'), await $.env.get('OS') === 'Windows_NT'
+      ? { exists: (path) => $.fs.exists(path) } : false)
 }
 
 async function readCommand($: Runtime, args: string[], name: string, signal: AbortSignal, timeoutMs = 120_000): Promise<string> {
