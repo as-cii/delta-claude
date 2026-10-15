@@ -10,6 +10,29 @@ tier('user')
 const test = testsWithHeldClockWait(kitTest)
 
 describe('joining', () => {
+  test('Windows mixed separators join and allow subdirectories but not sibling checkouts', async ($, on) => {
+    const fake = sharedThread(on, $)
+    const directory = String.raw`C:\Workspace\zed\delta\.delta\worktrees\rn4eercbxvfw\delta`
+    const reported = String.raw`C:\Workspace\zed\delta\.delta\worktrees\rn4eercbxvfw/delta`
+    fake.mountReply = (owner) => {
+      fake.root = reported
+      fake.worktreeItems = [{ reference: REFERENCE, checkouts: [
+        { directory: reported, state: 'detached', active: true },
+      ] }]
+      return cliFixture('mount', { thread_id: fake.threadId, owner, directory,
+        worktrees: [{ reference: REFERENCE, name: 'delta', directory, state: 'mounted' }] })
+    }
+    await $.session.start(sessionStart)
+    await $.command.run({ ...shareCommand, args: `join ${link(fake)}` })
+    await finishJoin(fake)
+    expect(fake.store.get(`session:${fake.session}`)).toMatchObject({ joined: true, snapshot: true, directory })
+    fake.cwd = `${directory}\\src`
+    expect((await $.prompt.submit(prompt('inside the checkout'))).drop).toBeUndefined()
+    fake.cwd = `${directory}-other`
+    expect((await $.prompt.submit(prompt('outside the checkout'))).drop).toBeDefined()
+    await $.session.end(sessionEnd(fake.session))
+  })
+
   for (const locator of [{ code: 'invalid_reference' }, { code: 'invalid_reference', reason: 'invalid_worktree_reference' }] as const) test(`an invalid join locator (${locator.reason ?? locator.code}) suggests the share link, not the same locator`, async ($, on) => {
     const fake = sharedThread(on, $)
     const address = 'unsupported-thread-address'

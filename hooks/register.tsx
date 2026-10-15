@@ -10,6 +10,7 @@ import { checkResult, reconnectDelay, validateAttachmentReceipt, validateCreatio
 import { copyText, personColor, personKey, renderBand, statusCurrentTurn, statusSpinnerRunning, SPINNER_FRAMES, threadTurnOwned, toolRowParts, type StatusSegment, type StatusState, type TurnStatus } from './status'
 import { announceThought, DrawnRows, DrawQueue, shownCommandRewrite, shownItemId, SHOW_ANSWER } from './row-delivery'
 import { restoreBinding } from './binding'
+import { pathKey, samePath } from './paths'
 import { PresenceTracker } from './presence'
 import {
   DeltaCommandError, DeltaSendError, appendFailure, classifyCommandFailure, permanentFailureAdvice,
@@ -1306,8 +1307,11 @@ function boundDirectory(binding?: Binding): string | undefined {
  * subdirectory is still the same checkout.
  */
 async function isInDirectory($: Runtime, directory: string) {
-  if (await $.session.root() !== directory) return false
-  const cwd = await $.session.cwd()
+  const root = await $.session.root()
+  if (!samePath(root, directory)) return false
+  const current = await $.session.cwd()
+  const cwd = pathKey(current, root, directory)
+  directory = pathKey(directory, root)
   return cwd === directory || cwd.startsWith(directory.endsWith('/') ? directory : `${directory}/`)
 }
 
@@ -1810,7 +1814,7 @@ async function checkoutRoot($: Runtime): Promise<string> {
 async function assertShareSession($: Runtime, request: ShareRequest) {
   const session = await $.session.id()
   const cwd = await $.session.cwd()
-  if (request.cancelled || sharing !== request || session !== request.session || cwd !== request.cwd)
+  if (request.cancelled || sharing !== request || session !== request.session || !samePath(cwd, request.cwd))
     throw new Error('The Claude session or folder changed during share; the obsolete share was stopped')
 }
 
@@ -1913,7 +1917,7 @@ async function share($: Runtime, request: ShareRequest): Promise<string> {
   validateAttachmentReceipt(attached, root)
   await serial(async () => {
     const current = await load($, session)
-    if ((current.checkout && current.checkout !== root) ||
+    if ((current.checkout && !samePath(current.checkout, root)) ||
         (current.checkoutReference !== undefined && current.checkoutReference !== attached.reference))
       throw new Error('Delta returned a different checkout reference or directory; the existing binding was preserved')
     await save($, { ...current, checkout: root, checkoutReference: attached.reference })
@@ -1963,7 +1967,7 @@ async function join($: Runtime, request: JoinRequest) {
   let fresh: string | undefined
   try {
     await assertJoinSession($, request.session, request)
-    if (await $.session.cwd() !== request.cwd)
+    if (!samePath(await $.session.cwd(), request.cwd))
       throw new Error('The session or folder changed while join was queued; retry from the intended session')
     const pending = await load($, request.session)
     const runtime = stateFor(request.session)
@@ -2048,7 +2052,7 @@ async function join($: Runtime, request: JoinRequest) {
       return
     }
     plan = { session: request.session, cwd: request.cwd, locator: request.locator, thread: status.thread_id }
-    if (await $.session.id() !== request.session || await $.session.cwd() !== request.cwd)
+    if (await $.session.id() !== request.session || !samePath(await $.session.cwd(), request.cwd))
       throw new Error('The session or folder changed during the access check; nothing was changed')
     if (activeBackgroundAgents(await $.agent.list()))
       throw new Error('A background agent started during the access check; stop it before retrying')
@@ -2274,7 +2278,7 @@ async function pendingHandoff($: Runtime, directory: string): Promise<Handoff | 
     let text: string
     try { text = await $.fs.read(`${folder}/${entry.name}`) as string } catch { continue }
     const handoff = parseHandoff(text)
-    if (handoff?.directory === directory) return handoff
+    if (handoff && samePath(handoff.directory, directory)) return handoff
   }
 }
 
@@ -2331,7 +2335,8 @@ async function enterDirectory($: Runtime, session: string, directory: string, ch
     { to: 'transcript' })
   await $.command.run({ command: 'cd', args: directory })
   await check()
-  if (await $.session.id() !== session || await $.session.cwd() !== directory || await $.session.root() !== directory)
+  if (await $.session.id() !== session || !samePath(await $.session.cwd(), directory) ||
+      !samePath(await $.session.root(), directory))
     throw new Error('Claude did not keep the session in the exact mounted directory; participation remains paused')
 }
 

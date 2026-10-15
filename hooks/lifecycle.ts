@@ -1,4 +1,5 @@
 import type { MountedThread, ThreadMount, ThreadState } from './thread-commands'
+import { samePath } from './paths'
 
 /** Clearing and resuming switch sessions; only exiting releases their mounts. */
 export function releasesMounts(reason: string): boolean {
@@ -26,7 +27,8 @@ export function worktreeChanges(previous: readonly ThreadMount[], directory: str
   return {
     added: mounted.worktrees.filter((tree) => !previous.some((mount) => mount.reference === tree.reference)),
     removed: previous.filter((mount) => !mounted.worktrees.some((tree) => tree.reference === mount.reference)),
-    moves: previous.some((mount) => mount.directory === directory) && mounted.directory !== directory,
+    moves: directory !== undefined && previous.some((mount) => samePath(mount.directory, directory)) &&
+      !samePath(mounted.directory, directory),
   }
 }
 

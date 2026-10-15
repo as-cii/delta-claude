@@ -153,6 +153,38 @@ describe('thread watch', () => {
     }, binding)).toThrow('ambiguous')
   })
 
+  test('Windows separator equivalence preserves checkout identity and readiness requirements', () => {
+    const directory = String.raw`C:\Workspace\zed\delta\.delta\worktrees\rn4eercbxvfw\delta`
+    const reported = String.raw`C:\Workspace\zed\delta\.delta\worktrees\rn4eercbxvfw/delta`
+    const mount = { reference: 'history#t=0', name: 'delta', directory }
+    const checkout = { directory: reported, state: 'detached' as const, active: true }
+    const state = (patch: object = {}): ThreadStatus => ({
+      ...status(), worktrees: { status: 'available', items: [
+        { reference: mount.reference, checkouts: [{ ...checkout, ...patch }] },
+      ] },
+    })
+    expect(validateJoinedMounts(state(), [mount])).toBeUndefined()
+    expect(validateThreadCheckout(state({ state: 'attached' }), { checkout: directory, checkoutReference: mount.reference }))
+      .toEqual({ directory: reported, reference: mount.reference })
+    expect(() => validateThreadCheckout(state(), { checkout: directory })).toThrow()
+    expect(() => validateJoinedMounts(state(), [{ ...mount, reference: 'other' }])).toThrow(JoinNotReadyError)
+    for (const patch of [{ active: false }, { state: 'missing' }, { directory: `${reported}-other` }])
+      expect(() => validateJoinedMounts(state(patch), [mount])).toThrow(JoinNotReadyError)
+    for (const [actual, requested] of [
+      [String.raw`\\server\share\delta`, '//server/share/delta'],
+      [String.raw`\\server\share\delta`, String.raw`//server/share\delta`],
+      [String.raw`\\server\share\delta`, String.raw`//server\share/delta`],
+      ['/repo/Delta', '/repo/delta'],
+      [String.raw`/repo/a\b`, '/repo/a/b'],
+      [String.raw`//server/share\delta`, '//server/share/delta'],
+      [directory, directory.toLowerCase()],
+    ]) {
+      const run = () => validateJoinedMounts(state({ directory: actual }), [{ ...mount, directory: requested }])
+      if (actual.startsWith('\\\\')) expect(run()).toBeUndefined()
+      else expect(run).toThrow(JoinNotReadyError)
+    }
+  })
+
   test('decodes the worktrees event and tolerates what a newer CLI adds to it', () => {
     expect(parseWatchEvent(JSON.stringify({ type: 'worktrees', worktrees: [] }))).toEqual({ type: 'worktrees', worktrees: [] })
     expect(parseWatchEvent(JSON.stringify({ type: 'worktrees', worktrees: [

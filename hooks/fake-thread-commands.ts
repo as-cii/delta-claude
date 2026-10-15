@@ -55,6 +55,19 @@ export const CONFIG = '/sandbox/config'
 export const MOUNTS = '/mounts'
 export const FOLDERS = '/thread-folders'
 
+/** The fixture has one virtual root; Windows hosts qualify its slash-led paths with a drive. */
+function fixturePath(path: string): string {
+  return path.replace(/\\/g, '/').replace(/^[a-z]:/i, '')
+}
+
+/** Apply the same host-path translation to test setup, assertions, and filesystem hooks. */
+class FixtureFiles extends Map<string, string> {
+  override set(path: string, text: string): this { return super.set(fixturePath(path), text) }
+  override get(path: string): string | undefined { return super.get(fixturePath(path)) }
+  override has(path: string): boolean { return super.has(fixturePath(path)) }
+  override delete(path: string): boolean { return super.delete(fixturePath(path)) }
+}
+
 export const sessionStart = { surface: 'terminal', isInteractive: true, cwd: CHECKOUT } as const
 export const shareCommand = {
   command: 'delta', args: 'share', origin: { kind: 'composer' },
@@ -226,7 +239,7 @@ export function fakeThreads(on: On, options: {
     endSession: undefined as ((session: string) => Promise<unknown>) | undefined,
     clock: mock.clock(on) as MockClock,
     store: new Map<string, unknown>(),
-    files: new Map<string, string>(),
+    files: new FixtureFiles(),
     commands: [] as string[][],
     watches: [] as Watch[],
     statusProcesses: [] as { closed: boolean; emittedBytes: number }[],
@@ -569,10 +582,11 @@ export function fakeThreads(on: On, options: {
     if (text === undefined) throw new Error(`ENOENT: ${e.path}`)
     return { value: { kind: 'file' as const, size: new TextEncoder().encode(text).byteLength, mtimeMs: 0, isLink: false } }
   })
-  on('fs.exists', ($, e) => ({ value: [...fake.files.keys()].some((path) => path === e.path || path.startsWith(`${e.path}/`)) }))
+  on('fs.exists', ($, e) => ({ value: [...fake.files.keys()].some((path) =>
+    path === fixturePath(e.path) || path.startsWith(`${fixturePath(e.path)}/`)) }))
   on('fs.list', async ($, e) => {
     if (fake.holdListing) await fake.holdListing
-    const prefix = `${e.path}/`
+    const prefix = `${fixturePath(e.path)}/`
     return { value: [...fake.files.keys()].filter((path) => path.startsWith(prefix) && !path.slice(prefix.length).includes('/'))
       .map((path) => ({ name: path.slice(prefix.length), kind: 'file' as const, size: 1, mtimeMs: 0, isLink: false })) }
   })

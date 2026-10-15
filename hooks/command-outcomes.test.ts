@@ -5,7 +5,8 @@ import { reconnectDelay, validateAttachmentReceipt, validatePublicationReceipt }
 test('attachment receipts require the intended directory, operation, and usable reference', () => {
   const directory = cliFixture('attach').directory
   validateAttachmentReceipt(cliFixture('attach'), directory)
-  for (const patch of [{ reference: ' ' }, { reference: undefined }, { directory: '/other' }, { operation: 'invalid' }])
+  validateAttachmentReceipt(cliFixture('attach', { directory: 'C:/repo/delta' }), String.raw`C:\repo\delta`)
+  for (const patch of [{ reference: ' ' }, { reference: undefined }, { directory: '/other' }, { directory: undefined }, { operation: 'invalid' }])
     expect(() => validateAttachmentReceipt(cliFixture('attach', patch), directory)).toThrow()
 })
 

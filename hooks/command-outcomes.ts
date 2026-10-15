@@ -1,5 +1,6 @@
 import { conversationWebLink } from './conversation'
 import { commandErrorFromEnvelope, DeltaCommandError } from './thread-commands'
+import { samePath } from './paths'
 import type { ProcessRunResult } from 'claude-code'
 
 /** Decode one short command result without assuming success from its exit code alone. */
@@ -27,7 +28,7 @@ export function validateCreationReceipt(created: Record<string, any>) {
 /** Require the requested checkout and a usable worktree reference. */
 export function validateAttachmentReceipt(attached: Record<string, any>, directory: string) {
   if (attached.operation !== 'mounted' || typeof attached.reference !== 'string' || !attached.reference.trim() ||
-      attached.directory !== directory)
+      typeof attached.directory !== 'string' || !samePath(attached.directory, directory))
     throw new Error('Invalid checkout attachment receipt; saved records remain queued')
 }
 

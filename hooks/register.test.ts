@@ -83,8 +83,10 @@ describe('thread commands', () => {
     expect(fake.cliSetups).toEqual(['discover', 'install'])
   })
 
-  for (const change of ['session', 'folder'] as const) test(`share stops when its ${change} changes during installation`, async ($, on) => {
+  for (const change of ['session', 'Windows folder', 'Windows path spelling'] as const)
+    test(`share ${change === 'Windows path spelling' ? 'continues' : 'stops'} when its ${change} changes during installation`, async ($, on) => {
     const fake = fakeThreads(on, { messages: [text('original conversation')] })
+    if (change.startsWith('Windows')) fake.cwd = 'C:\\repo'
     fake.cliMissing = true
     let entered!: () => void
     const waiting = new Promise<void>((resolve) => { entered = resolve })
@@ -104,12 +106,19 @@ describe('thread commands', () => {
       fake.session = 'replacement'
       fake.messages = [text('replacement conversation')]
       await $.session.start(sessionStart)
-    } else fake.cwd = '/different-checkout'
+    } else fake.cwd = change === 'Windows path spelling' ? 'C:/repo' : 'C:/different-checkout'
     release()
     await running
     await fake.clock.settle()
-    expect(fake.exports).toBe(0)
-    expectNoSetupCommands(fake, 0)
+    if (change === 'Windows path spelling') {
+      expect(fake.exports).toBe(1)
+      expect(fake.server.shared).toBe(true)
+      expect(fake.logs.join('\n')).not.toContain('Delta sharing failed')
+      expect(fake.records()).toHaveLength(1)
+    } else {
+      expect(fake.exports).toBe(0)
+      expectNoSetupCommands(fake, 0)
+    }
     expect((await $.prompt.submit(prompt('continue here'))).drop).toBeUndefined()
     fake.expectClean()
   })
