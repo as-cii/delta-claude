@@ -207,6 +207,8 @@ export function fakeThreads(on: On, options: {
   const fake = {
     session,
     cwd: CHECKOUT,
+    pluginVersion: '0.1.1',
+    cliIntegrations: [] as { operation: string; integration?: string }[],
     surfaces: ['terminal'] as ('terminal' | 'desktop')[],
     builtins: ['clear', 'cd'],
     sessionCommands: [] as { command: string; args: string }[],
@@ -216,8 +218,8 @@ export function fakeThreads(on: On, options: {
     opened: [] as string[],
     /** `open` fails, as it does where there is no macOS `open` to run. */
     failOpen: false,
-    /** Each `thread mount` the plugin asked for, by owner, and whether it asked for the thread folder. */
-    mountRequests: [] as { owner: string; folder: boolean }[],
+    /** Each `thread mount` the plugin asked for, including its independent folder and join flags. */
+    mountRequests: [] as { owner: string; folder: boolean; join: boolean }[],
     holdCommandListFor: undefined as ((session: string) => Promise<void> | undefined) | undefined,
     root: undefined as string | undefined,
     agents: [] as { id: string; description: string; type: string; status: string }[],
@@ -557,7 +559,8 @@ export function fakeThreads(on: On, options: {
     return { value: undefined }
   })
   on('fs.read', ($, e) => {
-    const value = fake.files.get(e.path)
+    const value = fake.files.get(e.path) ??
+      (e.path.endsWith('/.claude-plugin/plugin.json') ? JSON.stringify({ version: fake.pluginVersion }) : undefined)
     if (value === undefined) throw new Error(`Missing fixture file: ${e.path}`)
     return { value }
   })
@@ -593,12 +596,13 @@ export function fakeThreads(on: On, options: {
     }
     const parsed = cliArguments(argv)
     const operation = parsed?.positionals[1]
+    if (operation) fake.cliIntegrations.push({ operation, integration: e.init?.env?.DELTA_CLI_INTEGRATION })
     // The recording-contract probe is counted on its own (`contractChecks`) so tests asserting the
     // plugin's recording commands through `commands`/`delta()`/`operations()` stay unaffected by it.
     if (operation === 'contract') {
       fake.contractChecks++
       if (fake.contractUnknownSubcommand) return output('', 2, "error: unrecognized subcommand 'contract'")
-      return output(JSON.stringify(cliFixture('contract', fake.contractRange ?? {})))
+      return output(JSON.stringify(cliFixture('contract', fake.contractRange ?? { max: 2 })))
     }
     fake.commands.push(argv)
     if (argv[0] === '/selected/delta' && argv[1] === 'org')
@@ -703,14 +707,18 @@ export function fakeThreads(on: On, options: {
       }
     }
     const operation = cliArguments(e.argv)?.positionals[1]
+    if (operation) fake.cliIntegrations.push({ operation, integration: e.env?.DELTA_CLI_INTEGRATION })
     if (operation === 'mount') {
       fake.commands.push([...e.argv])
       const parsed = cliArguments(e.argv)
       const owner = String(parsed?.options['--owner'])
       const folder = parsed?.options['--folder'] === true
-      fake.mountRequests.push({ owner, folder })
+      const joining = parsed?.options['--join'] === true
+      fake.mountRequests.push({ owner, folder, join: joining })
+      if (joining && (fake.contractRange?.max ?? 2) < 3)
+        fake.violations.push('join-intent flag sent to an older CLI')
       if (!matchesCommand(e.argv, ['thread', 'mount', threadLocator(parsed?.positionals[2])],
-        { '--owner': ownerOf(owner), ...folder ? { '--folder': true as any } : {} }))
+        { '--owner': ownerOf(owner), ...folder ? { '--folder': true } : {}, ...joining ? { '--join': true } : {} }))
         fake.violations.push(`unexpected mount arguments: ${e.argv.join(' ')}`)
       const hold = await fake.holdRun?.(operation)
       if (hold) await hold
@@ -927,7 +935,7 @@ function cliArguments(argv: readonly string[]) {
     const argument = argv[index]!
     if (!argument.startsWith('--')) { positionals.push(argument); continue }
     if (Object.hasOwn(options, argument)) return undefined
-    if (argument === '--json' || argument === '--folder') { options[argument] = true; continue }
+    if (argument === '--json' || argument === '--folder' || argument === '--join') { options[argument] = true; continue }
     if (!['--source', '--external-id', '--thread', '--visibility', '--owner', '--owner-pid'].includes(argument)) return undefined
     const value = argv[++index]
     if (value === undefined || value.startsWith('--')) return undefined
@@ -937,7 +945,7 @@ function cliArguments(argv: readonly string[]) {
 }
 
 function matchesCommand(
-  argv: readonly string[], positionals: readonly (string | undefined)[], options: Record<string, string | undefined>,
+  argv: readonly string[], positionals: readonly (string | undefined)[], options: Record<string, string | boolean | undefined>,
 ): boolean {
   const parsed = cliArguments(argv)
   return !!parsed && parsed.positionals.length === positionals.length &&

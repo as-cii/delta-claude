@@ -58,6 +58,7 @@ describe('joining', () => {
 
   for (const surface of ['terminal'] as const) test(`${surface} joins in a fresh session and separate exact mount without exporting, attaching, publishing, or executing`, async ($, on) => {
     const fake = sharedThread(on, $)
+    fake.contractRange = { min: 1, max: 3 }
     fake.cliMissing = true
     fake.authReplies = [
       { status: 'signed_out' },
@@ -98,7 +99,10 @@ describe('joining', () => {
     })
     expect(fake.cwd).toBe(directory)
     expect(fake.delta().filter((argv) => argv[3] === 'mount')).toEqual([
-      ['/selected/delta', '--json', 'thread', 'mount', link(fake), '--owner', fake.session]])
+      ['/selected/delta', '--json', 'thread', 'mount', link(fake), '--owner', fake.session, '--join']])
+    expect(fake.cliIntegrations.filter((call) => call.operation === 'mount')).toEqual([
+      { operation: 'mount', integration: 'claude_code' },
+    ])
     // Delta places the checkouts: the plugin chooses no directory and keeps nothing under its config.
     expect([...fake.files.keys()].filter((path) => path.includes('checkouts'))).toEqual([])
     expect(fake.commands.some((argv) => argv[0] === 'pwd')).toBe(false)
@@ -123,7 +127,7 @@ describe('joining', () => {
     expect(fake.session).toBe(before)
     expect(fake.sessionCommands).toEqual([])
     // A one-worktree thread asks for its thread folder, which Desktop opens as a plain folder.
-    expect(fake.mountRequests).toEqual([{ owner: offer.owner, folder: true }])
+    expect(fake.mountRequests).toEqual([{ owner: offer.owner, folder: true, join: false }])
     expect(fake.opened).toEqual([newSessionLink(offer.folder, HANDOFF_PROMPT)])
     expect(JSON.parse(fake.files.get(offer.record)!)).toMatchObject({
       owner: offer.owner, thread: fake.threadId, locator: link(fake), directory: offer.folder,
@@ -137,14 +141,18 @@ describe('joining', () => {
 
   test("the session started in the thread's folder joins before its opening line, which becomes a one-word turn the thread never records", async ($, on) => {
     const fake = desktopTab(on, $)
+    fake.contractRange = { min: 1, max: 3 }
     const offer = await offerFromDesktopTab($, fake)
     await startInThreadFolder($, fake, offer.folder)
     // Claude delivers the first prompt once session.start returns, so the join is done by then.
     expect(fake.store.get('session:opened-from-link')).toMatchObject({
       joined: true, snapshot: true, owner: offer.owner, directory: offer.folder, locator: link(fake),
     })
-    // The session takes the mount over under the same owner; nothing clears or moves.
-    expect(fake.mountRequests.at(-1)).toEqual({ owner: offer.owner, folder: false })
+    // The requested offer reports one join. The automatic takeover reuses its mount without reporting another.
+    expect(fake.mountRequests).toEqual([
+      { owner: offer.owner, folder: true, join: true },
+      { owner: offer.owner, folder: false, join: false },
+    ])
     expect(fake.files.has(offer.record)).toBe(false)
     expect(fake.sessionCommands).toEqual([])
     expect(await bandText($)).toContain(LIVE)
@@ -233,6 +241,7 @@ describe('joining', () => {
 
   test('resume mounts again, moves Claude from its launch directory, and records only new rows', async ($, on) => {
     const fake = sharedThread(on, $)
+    fake.contractRange = { min: 1, max: 3 }
     await $.session.start(sessionStart)
     await $.command.run({ ...shareCommand, args: `join ${fake.shareId}` })
     await finishJoin(fake)
@@ -254,6 +263,7 @@ describe('joining', () => {
     expect(fake.sessionCommands.slice(moves)).toEqual([{ command: 'cd', args: binding.directory }])
     expect(fake.store.get(`session:${session}`)).toEqual(binding)
     expect(fake.delta().slice(commands).some((argv) => argv.includes('mount'))).toBe(true)
+    expect(fake.delta().slice(commands).filter((argv) => argv[3] === 'mount').every((argv) => !argv.includes('--join'))).toBe(true)
     expect(fake.operations().slice(commands).some((operation) => ['create', 'attach', 'share'].includes(operation!))).toBe(false)
     expect((await $.prompt.submit(prompt('after restore'))).drop).toBeUndefined()
     await $.tool.call(bash('new-tool', 'echo new local output'))
@@ -341,6 +351,7 @@ describe('joining', () => {
 
   test('worktrees added and removed live update the mounts, tell Claude and the person, and move Claude to the thread folder once', async ($, on) => {
     const fake = sharedThread(on, $)
+    fake.contractRange = { min: 1, max: 3 }
     await $.session.start(sessionStart)
     await $.command.run({ ...shareCommand, args: `join ${link(fake)}` })
     await finishJoin(fake)
@@ -362,6 +373,7 @@ describe('joining', () => {
     fake.addWorktree('zed')
     await fake.clock.advance(0)
     expect(mounts()).toBe(2)
+    expect(fake.delta().filter((argv) => argv[3] === 'mount').map((argv) => argv.includes('--join'))).toEqual([true, false])
     expect(fake.cwd).toBe(folder)
     expect(fake.sessionCommands.at(-1)).toEqual({ command: 'cd', args: folder })
     expect((fake.store.get(`session:${session}`) as any)).toMatchObject({

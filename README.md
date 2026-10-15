@@ -239,13 +239,20 @@ delta --json thread unmount THREAD --owner SESSION
 ```
 
 `thread contract` reports the recording-output contract versions the CLI build speaks
-(`{"operation":"contract","min":1,"max":1}`), answered locally without starting delta-app; the
+(`{"operation":"contract","min":1,"max":3}`), answered locally without starting delta-app; the
 plugin calls it once per session before its first recording command. If the plugin's contract version
 is outside that range, the plugin refuses to share, join, or resume and says to update Delta (the CLI
 is older than the plugin) or the plugin (the CLI is newer); a CLI that predates the subcommand is
 treated as an older Delta.
 
-The plugin speaks contract versions 1 and 2. Version 2 adds ACP's `session_info_update` to `append`,
+Contract 3 adds `thread mount --join` for an explicit join attempt. The plugin
+passes it only while completing a requested `/delta join`, not while restoring a
+session or refreshing worktrees in the background. The verified capability is
+kept across `/clear`. Older compatible CLI versions receive no new flag. New
+apps emit no join telemetry for mounts without it. This prevents background
+maintenance from adding user activity.
+
+The plugin speaks contract versions 1 through 3. Version 2 adds ACP's `session_info_update` to `append`,
 carrying the session's title, which Delta makes the thread's name in place of "Recorded conversation".
 When a shared session's turn ends, the plugin reads the title from that session's own transcript
 file, whose path the turn's end names: Claude's own `ai-title` row, or a `/rename`'s `custom-title`
@@ -406,6 +413,41 @@ A failed live-row save pauses sharing. Unsaved rows remain in memory for retry
 during that process. If it exits first, the plugin cannot recover those contents;
 a persisted fault flag prevents claiming completeness on resume. After recovery,
 forking into a fresh Claude session permits a new bounded export.
+
+### Product telemetry
+
+Every Delta CLI child process receives `DELTA_CLI_INTEGRATION=claude_code`.
+Delta uses that command's marker for `integration` on thread creation, sharing,
+sharing failures, joining, joining failures, and external-turn starts. It does not infer this value from a thread's
+creation or its latest producer. Older Delta clients ignore the environment
+marker and remain usable; their events keep unknown integration values.
+
+Live turn starts include the installed plugin's release version from
+`.claude-plugin/plugin.json`, in `update._meta.delta.producer_version`.
+Only numeric `major.minor.patch` versions within 32 bytes are sent.
+A missing or invalid version leaves the recording usable without that property.
+The metadata is optional. It uses ACP's existing `_meta` field, so older Delta
+clients can still record the turn.
+
+Confirmed main-turn completions send a fixed `stopReason`: Claude's `answer`
+maps to `end_turn`, an aborted turn maps to `cancelled`, and `refusal` and
+`error` keep those categories. An error carries only a fixed diagnostic, not
+Claude's error text. A recovery finish, an unrecognized completion reason,
+or a finish without a completion event stays unknown.
+
+Delta emits `External Turn Started` and `External Turn Finished` with a shared
+opaque ID for a newly recorded live turn. Duplicate and superseded records do
+not add events. The finish can join to the start's plugin version. These events
+do not contain messages, paths, tool inputs, or error text.
+
+Live starts also report `execution_location` when Claude supplies an explicit
+`CLAUDE_CODE_REMOTE` flag: `true` maps to `remote`, and `false` maps to `local`.
+Missing or unrecognized values stay unknown. This describes the Claude execution
+host, not the model's inference server. The flag does not identify the host owner,
+so `runner_host` is not sent. Neither the interactive surface nor the background
+Delta process is used to infer these values. DEL-3530 tracks the remaining
+per-action origin measures. The new event and properties also need typed
+warehouse publication before Hex can query them.
 
 ## Incoming activity and execution
 

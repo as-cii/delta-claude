@@ -14,7 +14,7 @@ import { PresenceTracker } from './presence'
 import {
   DeltaCommandError, DeltaSendError, appendFailure, classifyCommandFailure, permanentFailureAdvice,
   JoinNotReadyError, contractRefusal, contractVersion, parseThreadContract, parseThreadMount, parseThreadStatus, parseWatchEvent,
-  validateJoinedMounts, validateThreadFrontier, validateThreadCheckout, PLUGIN_CONTRACT_VERSION, TITLE_CONTRACT_VERSION,
+  validateJoinedMounts, validateThreadFrontier, validateThreadCheckout, PLUGIN_CONTRACT_VERSION, TITLE_CONTRACT_VERSION, JOIN_INTENT_CONTRACT_VERSION,
   type MountedThread, type ThreadContract, type ThreadMount, type ThreadReady, type ThreadState, type ThreadTurn, type WatchChild, type WatchEvent, type WatchItem,
 } from './thread-commands'
 import {
@@ -75,7 +75,7 @@ type RemoteTurn = { turnId: string | null; name: string; id?: string; since?: nu
 type ProgressTone = 'active' | 'done' | 'error'
 /** A join to finish in a session; `owner` names a mount another session made for it to take over. */
 type JoinPlan = { session: string; cwd: string; locator: string; thread: string; owner?: string }
-type JoinRequest = { session: string; cwd: string; locator: string; fresh?: string; clearing?: boolean; cancelled?: boolean }
+type JoinRequest = { session: string; cwd: string; locator: string; fresh?: string; clearing?: boolean; cancelled?: boolean; contractVersion?: number }
 type ShareRequest = { session: string; cwd: string; cancelled?: boolean }
 
 const encoder = new TextEncoder()
@@ -425,6 +425,7 @@ async function consumeConversation(
       if (!ownsObserver()) return
       stream = $.process.spawn({
         argv,
+        env: { DELTA_CLI_INTEGRATION: 'claude_code' },
       })
       const running = stream
       feed.stopProcess = () => running.return({ code: null, signal: 'SIGTERM' })
@@ -1006,7 +1007,9 @@ async function readThreadStatus($: Runtime, thread: string, session: string, sig
 }
 
 async function resolveCli($: Runtime, allowInstall = false) {
-  return cli.resolve((argv, init) => $.process.run(argv, init), allowInstall,
+  return cli.resolve((argv, init) => $.process.run(argv, {
+    ...init, env: { ...init?.env, DELTA_CLI_INTEGRATION: 'claude_code' },
+  }), allowInstall,
     (text) => setProgress($, text, 'active'), await $.env.get('OS') === 'Windows_NT'
       ? { exists: (path) => $.fs.exists(path) } : false)
 }
@@ -1017,7 +1020,10 @@ async function readCommand($: Runtime, args: string[], name: string, signal: Abo
   try {
     const executable = await resolveCli($)
     if (signal.aborted) throw new Error(`Delta ${name} cancelled`)
-    stream = $.process.spawn({ argv: [executable, '--json', ...args] })
+    stream = $.process.spawn({
+      argv: [executable, '--json', ...args],
+      env: { DELTA_CLI_INTEGRATION: 'claude_code' },
+    })
   }
   catch (error) { throw new DeltaCommandError('process_failed', `${name}: cannot run Delta CLI (${String(error)})`) }
   return readCommandStream(stream, name, signal,
@@ -1046,7 +1052,9 @@ async function readThreadContract($: Runtime): Promise<ThreadContract | undefine
   let result: Awaited<ReturnType<Runtime['process']['run']>>
   try {
     const executable = await resolveCli($)
-    result = await $.process.run([executable, '--json', 'thread', 'contract'], { timeoutMs: CONTRACT_TIMEOUT_MS })
+    result = await $.process.run([executable, '--json', 'thread', 'contract'], {
+      timeoutMs: CONTRACT_TIMEOUT_MS, env: { DELTA_CLI_INTEGRATION: 'claude_code' },
+    })
   } catch (error) {
     // The same failure a share or a status read reports when the CLI is missing or cannot start.
     throw new Error(`thread contract: cannot run Delta CLI (${String(error)}). Repair the selected Delta CLI and retry.`)
@@ -1261,7 +1269,9 @@ async function command($: Runtime, args: string[], name: string, check?: () => P
   try {
     const executable = await resolveCli($)
     if (check) await check()
-    result = await $.process.run([executable, '--json', ...args], { timeoutMs: 120_000 })
+    result = await $.process.run([executable, '--json', ...args], {
+      timeoutMs: 120_000, env: { DELTA_CLI_INTEGRATION: 'claude_code' },
+    })
   } catch (error) {
     throw new Error(`${name}: cannot run Delta CLI (${String(error)}). Install the matching new Delta CLI and app, and put delta on PATH.`)
   }
@@ -1356,7 +1366,9 @@ async function drainPending($: Runtime, session: string): Promise<boolean> {
         '--source', 'claude-code', '--external-id', session]
       let result: Awaited<ReturnType<Runtime['process']['run']>>
       try {
-        result = await $.process.run(argv, { stdin: collected.input, timeoutMs: 120_000 })
+        result = await $.process.run(argv, {
+          stdin: collected.input, timeoutMs: 120_000, env: { DELTA_CLI_INTEGRATION: 'claude_code' },
+        })
       } catch (error) { throw new DeltaCommandError('process_failed', `append did not finish (${String(error)})`) }
       if (result.isStdoutTruncated || result.isStderrTruncated)
         throw new DeltaCommandError('command_failed', 'append output was truncated, so no acknowledgment is assumed')
@@ -1386,6 +1398,19 @@ async function drainPending($: Runtime, session: string): Promise<boolean> {
 
 async function beginExecution($: Runtime, session: string, turnId: string) {
   await serial(async () => {
+    let producerVersion: string | undefined
+    let executionLocation: 'local' | 'remote' | undefined
+    try {
+      const manifest = JSON.parse(await $.fs.read(`${$.plugin.root}/.claude-plugin/plugin.json`))
+      if (typeof manifest.version === 'string' && manifest.version.length <= 32 &&
+          /^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$/.test(manifest.version))
+        producerVersion = manifest.version
+    } catch (error) { await report($, error) }
+    try {
+      const remote = await $.env.get('CLAUDE_CODE_REMOTE')
+      if (remote === 'true') executionLocation = 'remote'
+      else if (remote === 'false') executionLocation = 'local'
+    } catch (error) { await report($, error) }
     let binding = await load($, session)
     // A delayed completion must not close this new turn. Finish only the stored
     // predecessor, then persist the new start and local identity in one manifest.
@@ -1396,7 +1421,13 @@ async function beginExecution($: Runtime, session: string, turnId: string) {
     }
     const sequence = binding.next
     binding = await stageRecord($, binding, {
-      turnSequence: sequence, update: { sessionUpdate: 'state_update', state: 'running' },
+      turnSequence: sequence, update: {
+        sessionUpdate: 'state_update', state: 'running',
+        ...producerVersion || executionLocation ? { _meta: { delta: {
+          ...producerVersion ? { producer_version: producerVersion } : {},
+          ...executionLocation ? { execution_location: executionLocation } : {},
+        } } } : {},
+      },
     })
     binding.execution = { sequence, turnId }
     binding.lastTurnSequence = sequence
@@ -1443,6 +1474,7 @@ async function endExecution(
   sequence: number,
   isCurrent = () => true,
   delivery: 'await' | 'bounded' | 'background' = 'await',
+  stopReason?: 'end_turn' | 'cancelled' | 'refusal' | 'error',
 ) {
   await serial(async () => {
     if (!isCurrent()) return
@@ -1451,7 +1483,11 @@ async function endExecution(
     if (!isCurrent() || !execution || execution.sequence !== sequence) return
     if (!execution.endSequence) {
       binding = await stageRecord($, binding, {
-        turnSequence: sequence, update: { sessionUpdate: 'state_update', state: 'idle' },
+        turnSequence: sequence, update: {
+          sessionUpdate: 'state_update', state: 'idle',
+          ...stopReason ? { stopReason } : {},
+          ...stopReason === 'error' ? { error: { code: -32603, message: 'External producer reported an error' } } : {},
+        },
       })
     }
     delete binding.execution
@@ -1939,6 +1975,8 @@ async function join($: Runtime, request: JoinRequest) {
     // Refuse a CLI this plugin cannot record against before any transition, mount, or clear.
     await resolveCli($, true)
     await requireContract($, request.session)
+    // `/clear` ends the old session and removes its cached contract before the fresh session mounts.
+    request.contractVersion = contractVerified.get(request.session) ?? PLUGIN_CONTRACT_VERSION
     const check = async () => {
       await assertJoinSession($, request.session, request)
       if (await $.session.cwd() !== request.cwd)
@@ -2089,11 +2127,14 @@ async function requireJoinCommands($: Runtime, names: string[]) {
 /** Complete only the saved fresh session's transition, never clear again on retry. */
 async function completeJoin($: Runtime, session: string, plan: JoinPlan, request: JoinRequest) {
   // This session runs against the same CLI build `join` already verified for this process.
-  contractVerified.set(session, contractVerified.get(request.session) ?? PLUGIN_CONTRACT_VERSION)
+  contractVerified.set(session, request.contractVersion ?? PLUGIN_CONTRACT_VERSION)
   const check = () => assertJoinSession($, session, request)
   await check()
   setProgress($, "Mounting the thread's worktrees…", 'active')
-  const mounted = await mountThread($, { session, thread: plan.thread, locator: plan.locator, owner: plan.owner })
+  const mounted = await mountThread(
+    $, { session, thread: plan.thread, locator: plan.locator, owner: plan.owner },
+    { reportJoin: !plan.owner },
+  )
   await check()
   requireMounted(mounted, plan.thread)
   // Remember the verified destination even if Claude refuses /cd; the retry notice must name it.
@@ -2136,10 +2177,18 @@ async function completeJoin($: Runtime, session: string, plan: JoinPlan, request
  * a plain folder rather than a repository it would make yet another worktree of.
  */
 async function mountThread(
-  $: Runtime, binding: { session: string; thread?: string; locator?: string; owner?: string }, folder = false,
+  $: Runtime,
+  binding: { session: string; thread?: string; locator?: string; owner?: string },
+  options: { folder?: boolean; reportJoin?: boolean } = {},
 ): Promise<MountedThread> {
   const owner = binding.owner ?? binding.session
-  const args = ['thread', 'mount', binding.locator ?? binding.thread!, '--owner', owner, ...folder ? ['--folder'] : []]
+  const args = [
+    'thread', 'mount', binding.locator ?? binding.thread!, '--owner', owner,
+    ...options.folder ? ['--folder'] : [],
+  ]
+  if (options.reportJoin &&
+      (contractVerified.get(binding.session) ?? PLUGIN_CONTRACT_VERSION) >= JOIN_INTENT_CONTRACT_VERSION)
+    args.push('--join')
   // A first mount can materialize large checkouts, which the CLI waits for.
   return parseThreadMount(await readCommand($, args, 'thread mount', new AbortController().signal, MOUNT_TIMEOUT_MS), owner)
 }
@@ -2156,7 +2205,10 @@ async function offerHandoff($: Runtime, request: JoinRequest, status: ThreadStat
   const check = () => assertJoinSession($, request.session, request)
   setProgress($, "Mounting the thread's worktrees…", 'active')
   const single = status.worktrees.status === 'available' && status.worktrees.items.length === 1
-  const mounted = await mountThread($, { session: request.session, thread: status.thread_id, locator: request.locator, owner }, single)
+  const mounted = await mountThread(
+    $, { session: request.session, thread: status.thread_id, locator: request.locator, owner },
+    { folder: single, reportJoin: true },
+  )
   const handoff: Handoff = {
     owner, thread: status.thread_id, locator: request.locator, directory: mounted.directory,
     created: await $.clock.now(),
@@ -2235,6 +2287,7 @@ async function claimHandoff($: Runtime, session: string, handoff: Handoff) {
   try {
     setProgress($, 'Joining the shared thread…', 'active')
     await requireContract($, session)
+    request.contractVersion = contractVerified.get(session) ?? PLUGIN_CONTRACT_VERSION
     await takeOverHandoff($, request, handoff)
   } catch (error) {
     if (request.cancelled) return
@@ -2351,7 +2404,9 @@ async function releaseMounts($: Runtime, session: string) {
 async function unmountThread($: Runtime, thread: string, owner: string) {
   try {
     const argv = [await resolveCli($), '--json', 'thread', 'unmount', thread, '--owner', owner]
-    const result = await $.process.run(argv, { timeoutMs: RELEASE_TIMEOUT_MS })
+    const result = await $.process.run(argv, {
+      timeoutMs: RELEASE_TIMEOUT_MS, env: { DELTA_CLI_INTEGRATION: 'claude_code' },
+    })
     if (result.exitCode !== 0) await $.ui.log(`Delta thread unmount failed: ${result.stderr.trim() || result.stdout.trim()}`, { to: 'debug' })
   } catch (error) { await $.ui.log(`Delta thread unmount did not run: ${String(error)}`, { to: 'debug' }) }
 }
@@ -2639,7 +2694,11 @@ export function register(on: On) {
     const result = await next(e)
     if (sequence !== undefined) runtime.tools.forgetUnpaired(sequence)
     if (sequence !== undefined) {
-      try { await endExecution($, session, sequence, () => true, 'bounded') }
+      const stopReason = e.isAborted || e.reason === 'aborted' ? 'cancelled'
+        : e.reason === 'answer' ? 'end_turn'
+        : e.reason === 'refusal' ? 'refusal'
+        : e.reason === 'error' ? 'error' : undefined
+      try { await endExecution($, session, sequence, () => true, 'bounded', stopReason) }
       catch (error) { await report($, error) }
     }
     // Release the remote rows held back while this turn ran now that its finish is staged: delivered
