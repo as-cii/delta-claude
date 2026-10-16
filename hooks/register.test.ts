@@ -153,6 +153,8 @@ describe('thread commands', () => {
     expect(records.at(-1)).toMatchObject({ update: { content: [{ text: 'third' }] } })
     expect(records.every((record) => record.turnSequence === undefined)).toBe(true)
     expect(records.every((record) => record.update?._meta?.delta === undefined)).toBe(true)
+    // Every append names the producer; its identity stays the source and session.
+    expect([...new Set(fake.producerNames())]).toEqual(['Claude Code'])
 
     fake.messages = [text('changed export must not be imported')]
     expect(await fake.share($)).toBe(url)
@@ -332,6 +334,8 @@ describe('thread commands', () => {
     await fake.clock.settle()
     expect(fake.records().map((record) => record.sequence)).toEqual([1, 2])
     expectStagedRecords(fake, [])
+    // Each retry names the producer again, rather than only the append that first carried the record.
+    expect([...new Set(fake.producerNames())]).toEqual(['Claude Code'])
     expect(fake.statuses.at(-1)).toBeUndefined()
     // Delivery recovered, so the band is back to connected.
     expect(await drawn($)).toContain('"color":"green"')
@@ -959,6 +963,8 @@ describe('thread commands', () => {
     expect(await drawn($)).toContain(PENDING)
     const idle = fake.watches.at(-1)!
     expect(idle.closed).toBe(false)
+    // Participation lasts as long as a watch, so every reconnection asks for it again.
+    expect(fake.watches.slice(first).every((watch) => watch.argv.includes('--participate'))).toBe(true)
     await $.session.end(sessionEnd(fake.session))
     await fake.clock.settle()
     expect(idle.closed).toBe(true)
@@ -1104,6 +1110,7 @@ describe('thread commands', () => {
     await $.session.start(sessionStart)
     fake.contractRange = { min: 0, max: 0 }
     expect(await fake.share($)).toContain('Update Delta')
+    expect(fake.watches).toEqual([])
     // Nothing was created, attached, published, or imported, and no record was appended.
     expect(fake.server.thread).toBeUndefined()
     expect(fake.server.mount).toBeUndefined()
@@ -1122,7 +1129,7 @@ describe('thread commands', () => {
   test('a CLI newer than this plugin asks the person to update the plugin', async ($, on) => {
     const fake = fakeThreads(on, { messages: [text('initial')] })
     await $.session.start(sessionStart)
-    fake.contractRange = { min: 5, max: 6 }
+    fake.contractRange = { min: 6, max: 7 }
     expect(await fake.share($)).toContain('Update the Delta plugin')
     expect(fake.server.thread).toBeUndefined()
     expect(fake.records()).toEqual([])
@@ -1206,6 +1213,38 @@ describe('thread commands', () => {
     fake.expectClean()
   })
 
+  test('a CLI that predates producer names watches passively and records unnamed, and a resumed session renegotiates', async ($, on) => {
+    const fake = fakeThreads(on, { messages: [text('initial')] })
+    fake.contractRange = { min: 1, max: 4 }
+    await $.session.start(sessionStart)
+    expect(await fake.share($)).toBe(`https://delta.dev/join/${fake.shareId}`)
+    expect(fake.watches.map((watch) => watch.argv.includes('--participate'))).toEqual([false])
+    // Everything contract 4 speaks still works; only the producer's name is left out, and nobody is told to update.
+    const transcript = '/config/projects/repo/session.jsonl'
+    fake.files.set(transcript, JSON.stringify({ type: 'ai-title', aiTitle: 'Fix the parser', sessionId: fake.session }) + '\n')
+    await $.classic.Stop({ transcript_path: transcript, stop_hook_active: false } as any)
+    await fake.clock.settle()
+    expect(fake.records().filter((record) => record.update?.sessionUpdate === 'session_info_update')
+      .map((record) => record.update!.title)).toEqual(['Fix the parser'])
+    expect(fake.producerNames().length).toBeGreaterThan(0)
+    expect(fake.producerNames().every((name) => name === undefined)).toBe(true)
+    expect(fake.logs.join('\n')).not.toContain('Update')
+    await $.session.end(sessionEnd(fake.session))
+    // Resuming against a Delta updated to contract 5 asks it again, and now the watch participates.
+    fake.contractRange = undefined
+    await $.session.start(sessionStart)
+    await fake.clock.settle()
+    expect(fake.watches.map((watch) => watch.argv.includes('--participate'))).toEqual([false, true])
+    expect(fake.contractChecks).toBe(2)
+    // Its appends now name the producer too.
+    const unnamed = fake.producerNames().length
+    await $.tool.call(bash('after-update', 'echo after update'))
+    await fake.clock.settle()
+    expect(fake.updates().map((record) => record.update?.toolCallId)).toContain('after-update')
+    expect([...new Set(fake.producerNames().slice(unnamed))]).toEqual(['Claude Code'])
+    fake.expectClean()
+  })
+
   test('a CLI that predates thread contract is treated as too old', async ($, on) => {
     const fake = fakeThreads(on, { messages: [text('initial')] })
     await $.session.start(sessionStart)
@@ -1236,13 +1275,73 @@ describe('thread commands', () => {
     await $.session.end(sessionEnd(fake.session))
     const watches = fake.watches.length
     // A resumed session re-checks; a Delta that now speaks only a newer contract blocks it.
-    fake.contractRange = { min: 5, max: 6 }
+    fake.contractRange = { min: 6, max: 7 }
     await $.session.start(sessionStart)
     expect(fake.store.get(`session:${fake.session}`)).toEqual(binding)
     expect(fake.watches.length).toBe(watches)
     expect(await drawn($)).toContain('Update the Delta plugin')
     expect(fake.logs.join('\n')).toContain('Update the Delta plugin')
     expect((await $.prompt.submit(prompt('blocked'))).drop).toContain('Update the Delta plugin')
+    fake.expectClean()
+  })
+
+  test('an interrupted share negotiates the contract before recovering its outbox', async ($, on) => {
+    const fake = fakeThreads(on)
+    await $.session.start(sessionStart)
+    await fake.share($)
+    await $.session.end(sessionEnd(fake.session))
+    // A thread and a queued first record, but no committed snapshot: activation recovers the
+    // outbox without starting participation, which is where the contract is otherwise read.
+    await seedPending(fake, [{ schemaVersion: 1, sequence: 1, update: { sessionUpdate: 'state_update', state: 'idle' } }])
+    fake.store.set(`session:${fake.session}`, { ...fake.store.get(`session:${fake.session}`) as object, snapshot: false })
+    const checksAtAppend: number[] = []
+    fake.holdRun = (operation) => { if (operation === 'append') checksAtAppend.push(fake.contractChecks) }
+    // An incompatible CLI is refused before anything is appended.
+    fake.contractRange = { min: 6, max: 7 }
+    await $.session.start(sessionStart)
+    await fake.clock.settle()
+    expect(checksAtAppend).toEqual([])
+    expect(fake.logs.join('\n')).toContain('Update the Delta plugin')
+    await $.session.end(sessionEnd(fake.session))
+    // Against contract 5 the recovered first record names the producer, since Delta keeps that name.
+    fake.contractRange = undefined
+    const checks = fake.contractChecks
+    await $.session.start(sessionStart)
+    await fake.clock.settle()
+    expect(checksAtAppend).toEqual([checks + 1])
+    expect(fake.producerNames()).toEqual(['Claude Code'])
+    expect(fake.store.get(`session:${fake.session}`)).toMatchObject({ pending: [] })
+    fake.expectClean()
+  })
+
+  test('a contract answer for an ended session is neither remembered nor used once it resumes', async ($, on) => {
+    const fake = fakeThreads(on)
+    await $.session.start(sessionStart)
+    await fake.share($)
+    await $.session.end(sessionEnd(fake.session))
+    await seedPending(fake, [{ schemaVersion: 1, sequence: 1, update: { sessionUpdate: 'state_update', state: 'idle' } }])
+    fake.store.set(`session:${fake.session}`, { ...fake.store.get(`session:${fake.session}`) as object, snapshot: false })
+    // Recovery asks a contract-4 CLI, and the session ends and resumes before the answer arrives.
+    let answer!: () => void
+    const held = new Promise<void>((resolve) => { answer = resolve })
+    fake.holdRun = (operation) => {
+      if (operation !== 'contract') return
+      fake.holdRun = undefined
+      return held
+    }
+    fake.contractRange = { min: 1, max: 4 }
+    await $.session.start(sessionStart)
+    await fake.clock.settle()
+    await $.session.end(sessionEnd(fake.session))
+    fake.contractRange = undefined
+    const checks = fake.contractChecks
+    await $.session.start(sessionStart)
+    answer()
+    await fake.clock.settle()
+    // The resumed session asked again and appended once, as contract 5.
+    expect(fake.contractChecks).toBe(checks + 1)
+    expect(fake.producerNames()).toEqual(['Claude Code'])
+    expect(fake.store.get(`session:${fake.session}`)).toMatchObject({ pending: [] })
     fake.expectClean()
   })
 })

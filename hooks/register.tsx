@@ -16,6 +16,7 @@ import {
   DeltaCommandError, DeltaSendError, appendFailure, classifyCommandFailure, permanentFailureAdvice,
   JoinNotReadyError, contractRefusal, contractVersion, parseThreadContract, parseThreadMount, parseThreadStatus, parseWatchEvent,
   validateJoinedMounts, parseThreadFork, validateThreadFrontier, validateThreadCheckout, OFFLINE_CONTRACT_VERSION, PLUGIN_CONTRACT_VERSION, TITLE_CONTRACT_VERSION, JOIN_INTENT_CONTRACT_VERSION,
+  PRODUCER_NAME, PRODUCER_NAME_CONTRACT_VERSION,
   type MountedThread, type ThreadContract, type ThreadMount, type ThreadReady, type ThreadState, type ThreadStatus, type ThreadTurn, type ThreadUpload, type WatchChild, type WatchEvent, type WatchItem,
 } from './thread-commands'
 import {
@@ -474,8 +475,13 @@ async function consumeConversation(
       if (!ownsObserver()) return
       if (!boundDirectory(binding))
         throw new Error('No attached thread selected; run /delta share from the intended Git checkout')
+      // `--participate` asks Delta to show this session's signed-in person in the thread, under the
+      // name it gives, for as long as this watch runs; the stop below and each reconnect end and
+      // renew it. A CLI whose contract predates it is watched passively, without telling the person.
+      const participates = (contractVerified.get(session) ?? 0) >= PRODUCER_NAME_CONTRACT_VERSION
       const argv = [await resolveCli($), '--json', 'thread', 'watch', binding.locator ?? binding.thread,
-        '--source', 'claude-code', '--external-id', session]
+        '--source', 'claude-code', '--external-id', session,
+        ...participates ? ['--participate', PRODUCER_NAME] : []]
       if (!ownsObserver()) return
       stream = $.process.spawn({
         argv,
@@ -1217,15 +1223,21 @@ async function readCommand($: Runtime, args: string[], name: string, signal: Abo
 }
 
 /**
- * Refuse to record against a CLI whose recording contract this plugin does not speak. Runs once per
- * session; a refusal or a process failure is not remembered, so updating Delta and retrying re-checks.
+ * Refuse to record against a CLI whose recording contract this plugin does not speak, and return
+ * the newest version both speak. Runs once per session; a refusal or a process failure is not
+ * remembered, so updating Delta and retrying re-checks. Nor is an answer that arrives after the
+ * session ended or was activated again, even under the same ID, so a resumed session renegotiates.
  */
-async function requireContract($: Runtime, session: string) {
-  if (contractVerified.has(session)) return
+async function requireContract($: Runtime, session: string): Promise<number> {
+  const verified = contractVerified.get(session)
+  if (verified !== undefined) return verified
+  const epoch = sessionEpoch
   const range = await readThreadContract($)
   const refusal = contractRefusal(range)
   if (refusal) throw new Error(refusal)
-  contractVerified.set(session, contractVersion(range!))
+  const version = contractVersion(range!)
+  if (active === session && sessionEpoch === epoch) contractVerified.set(session, version)
+  return version
 }
 
 /**
@@ -1573,11 +1585,28 @@ async function verifyCheckout($: Runtime, binding: Binding) {
   return status
 }
 
-/** Resolves true only when every pending record was delivered; stopping early because of a pause or session change is not success. */
+/**
+ * Resolves true only when every pending record was delivered; stopping early because of a pause or
+ * session change is not success. Rejects with the refusal, and appends nothing, when the CLI's
+ * recording contract is one this plugin does not speak.
+ */
 async function drainPending($: Runtime, session: string): Promise<boolean> {
-    while (active === session && sessions.has(session) && !isPaused(sessions.get(session)!)) {
+    const delivering = () => active === session && sessions.has(session) && !isPaused(sessions.get(session)!)
+    while (delivering()) {
       const binding = await serial(async () => load($, session))
       if (!binding.thread || !binding.pending.length) return true
+      // Each append's flags follow the negotiated contract, and Delta keeps the producer name the
+      // stream first recorded with, so a recovered outbox negotiates before its first append. An
+      // answer that arrives after the session ended or was activated again belongs to that earlier
+      // lifetime: it neither appends nor reports, and the current one negotiates for itself.
+      const epoch = sessionEpoch
+      let contract: number
+      try { contract = await requireContract($, session) }
+      catch (error) {
+        if (!delivering() || sessionEpoch !== epoch) return false
+        throw error
+      }
+      if (!delivering() || sessionEpoch !== epoch) return false
       try { await verifyCheckout($, binding) }
       catch (error) {
         // An unanswered check says nothing about the checkout. A session that records offline still
@@ -1601,9 +1630,13 @@ async function drainPending($: Runtime, session: string): Promise<boolean> {
         turnSequences.push(turnSequence)
         if (collected.bytes >= 2_000_000) break
       }
+      // Every append names the producer, retries included, so attribution never depends on a live
+      // watch. An older CLI refuses the flag.
+      const named = contract >= PRODUCER_NAME_CONTRACT_VERSION
       const argv = [await resolveCli($), '--json', 'thread', 'append', binding.locator ?? binding.thread,
         '--source', 'claude-code', '--external-id', session,
-        ...recordsOffline(session, binding) ? ['--acknowledge', 'local'] : []]
+        ...recordsOffline(session, binding) ? ['--acknowledge', 'local'] : [],
+        ...named ? ['--producer-name', PRODUCER_NAME] : []]
       let result: Awaited<ReturnType<Runtime['process']['run']>>
       try {
         result = await $.process.run(argv, {
@@ -2220,9 +2253,8 @@ async function join($: Runtime, request: JoinRequest) {
       throw new Error('Stop background agents and teammates before joining; an idle main turn is not sufficient')
     // Refuse a CLI this plugin cannot record against before any transition, mount, or clear.
     await resolveCli($, true)
-    await requireContract($, request.session)
     // `/clear` ends the old session and removes its cached contract before the fresh session mounts.
-    request.contractVersion = contractVerified.get(request.session) ?? PLUGIN_CONTRACT_VERSION
+    request.contractVersion = await requireContract($, request.session)
     const check = async () => {
       await assertJoinSession($, request.session, request)
       if (await $.session.cwd() !== request.cwd)
@@ -2532,8 +2564,7 @@ async function claimHandoff($: Runtime, session: string, handoff: Handoff) {
   const request: JoinRequest = { session, cwd: handoff.directory, locator: handoff.locator }
   try {
     setProgress($, 'Joining the shared thread…', 'active')
-    await requireContract($, session)
-    request.contractVersion = contractVerified.get(session) ?? PLUGIN_CONTRACT_VERSION
+    request.contractVersion = await requireContract($, session)
     await takeOverHandoff($, request, handoff)
   } catch (error) {
     if (request.cancelled) return
@@ -3043,9 +3074,8 @@ function activateAutomatically($: Runtime, session: string, root: string, upload
     try {
       // Refuse a CLI that cannot record offline before persisting anything, so an incompatible build
       // leaves the session manual rather than holding a half-initialized automatic binding.
-      await requireContract($, session)
+      const version = await requireContract($, session)
       if (!ownsActivation()) return
-      const version = contractVerified.get(session) ?? PLUGIN_CONTRACT_VERSION
       if (version < OFFLINE_CONTRACT_VERSION) {
         // Auto mode cannot record without a CLI that speaks the offline contract; say so once.
         await notifyOnce($, `Delta must be updated for automatic uploads: this CLI speaks recording contract ${version}, and automatic recording needs ${OFFLINE_CONTRACT_VERSION}. This checkout keeps recording manually until Delta is updated.`)

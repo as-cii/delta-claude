@@ -372,7 +372,7 @@ function inspectionUnavailableMessage(error: { code: string; reason?: string; me
 /** The oldest recording-output contract version this plugin speaks. */
 export const PLUGIN_CONTRACT_VERSION = 1
 /** The newest recording-output contract version this plugin speaks. */
-export const PLUGIN_CONTRACT_MAX = 4
+export const PLUGIN_CONTRACT_MAX = 5
 /** The first contract version whose `append` accepts `session_info_update`, which carries a title. */
 export const TITLE_CONTRACT_VERSION = 2
 /**
@@ -382,6 +382,19 @@ export const TITLE_CONTRACT_VERSION = 2
 export const OFFLINE_CONTRACT_VERSION = 4
 /** The first contract whose mount command accepts an explicit join-intent flag. */
 export const JOIN_INTENT_CONTRACT_VERSION = 3
+/**
+ * The first contract version that accepts `PRODUCER_NAME`: `thread watch --participate` and
+ * `thread append --producer-name`. An older CLI rejects either flag, a watch's with a usage error
+ * indistinguishable from a lost connection, so it is passed neither: its watch is passive and
+ * that Delta keeps its existing attribution behavior.
+ */
+export const PRODUCER_NAME_CONTRACT_VERSION = 5
+/**
+ * The name Delta shows for this producer: the recording's attribution (`append --producer-name`)
+ * and the harness beside a present person (`watch --participate`). Identity stays the source and
+ * external id; this is only presentation.
+ */
+export const PRODUCER_NAME = 'Claude Code'
 
 /** The range of recording-output contract versions a CLI build speaks. */
 export type ThreadContract = { operation: 'contract'; min: number; max: number }

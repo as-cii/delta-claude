@@ -52,6 +52,10 @@ inputs and outputs and Claude's thinking, plus the files in your checkout
 until you share or join a session, or the repository's policy records it
 automatically.
 
+With an updated Delta CLI and client, a shared or joined session can show you
+as connected through Claude Code. An open Delta view takes precedence; older
+CLIs continue working without publishing this presence.
+
 The plugin sends product telemetry to Delta: which integration ran each
 command, the plugin version, and when turns start and finish and how they ended.
 Telemetry events contain no messages, file paths, tool inputs, or error text.
