@@ -46,7 +46,7 @@ test('failed and unknown authentication outcomes stop share without creating a t
     expect(result).toContain('Delta sharing failed')
     if (status === 'access_denied') {
       expect(result).toContain('https://example.com/access')
-      expect(result).toContain("Resolve access, then run in your shell: '/selected/delta' auth login. After signing in again, retry /delta share or /delta join <link>.")
+      expect(result).toContain("Resolve access, then run in your shell: '/selected/delta' auth login. After signing in again, retry /delta-share or /delta-join <link>.")
     }
     expect(fake.server.thread).toBeUndefined()
     expect(fake.records()).toEqual([])
@@ -55,23 +55,17 @@ test('failed and unknown authentication outcomes stop share without creating a t
   fake.expectClean()
 })
 
-test('headless share returns a pending sign-in link without waiting, and a signed-in retry shares', async ($, on) => {
+test('unaccepted beta terms point to the terms page and a retry, without a failure or a new sign-in', async ($, on) => {
   const fake = fakeThreads(on)
-  fake.surfaces = []
-  fake.authReplies = loginReplies()
-  fake.holdAuth = new Promise(() => {})
   await $.session.start(sessionStart)
-  expect(await $.command.run(shareCommand)).toEqual({
-    text: 'Delta sign-in is pending. Open https://example.com/login in your browser and finish signing in, then retry /delta share. This link expires at 2099-01-01T00:15:00Z. No thread has been shared by this command.',
-  })
-  expect(fake.authCalls.map((argv) => argv.slice(2))).toEqual([
-    ['auth', 'status'], ['auth', 'login', '--no-wait', '--no-browser'],
-  ])
+  fake.authReplies = [{ status: 'access_denied', reason: 'terms_not_accepted', message: 'Accept the terms.', url: 'https://zed.dev/delta/terms' }]
+  await $.command.run(shareCommand)
+  await fake.clock.advance(0)
+  await fake.clock.settle()
+  expect(fake.logs).toContain('Delta needs you to accept its beta terms first. Accept them here: https://zed.dev/delta/terms\nThen run /delta-share or /delta-join <link> again.')
+  expect(fake.logs.join('\n')).not.toContain('Delta sharing failed')
+  expect(fake.authCalls.map((argv) => argv[3])).toEqual(['status'])
   expect(fake.server.thread).toBeUndefined()
-  expect(fake.exports).toBe(0)
-  expect(await $.command.run(shareCommand)).toEqual({
-    text: `Delta share link: https://delta.dev/join/${fake.shareId}`,
-  })
   fake.expectClean()
 })
 

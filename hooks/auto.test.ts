@@ -1,7 +1,7 @@
 import { describe, expect, test as kitTest, tier } from 'claude-code/testing'
 import type { Engine } from 'claude-code'
 import {
-  CHECKOUT, abovePrompt, fakeThreads, prompt, sessionEnd, sessionStart, testsWithHeldClockWait, turnComplete, turnStart, typedDelta,
+  CHECKOUT, abovePrompt, fakeThreads, prompt, sessionEnd, sessionStart, shareCommand, testsWithHeldClockWait, turnComplete, turnStart, typedDelta,
 } from './fake-thread-commands'
 
 tier('user')
@@ -27,6 +27,20 @@ function seedEnded(store: Map<string, unknown>, id: string, overrides: Record<st
   store.set(`appended:${id}`, { thread: 't', items: {} })
 }
 
+type ReminderKind = 'manual' | 'not set up' | 'none'
+
+/** The reminder the band shows a session Delta does not sync, by what it tells the person. */
+async function reminderKind($: Engine): Promise<ReminderKind> {
+  const band = await drawn($)
+  if (band.includes('Not syncing') && band.includes('/delta-share')) return 'manual'
+  return band.includes('Not set up') && band.includes('/delta-setup') ? 'not set up' : 'none'
+}
+
+/** Store a recorded session for the fixture's session to resume; `overrides` change any binding field. */
+function seedResumed(fake: ReturnType<typeof fakeThreads>, overrides: Record<string, unknown> = {}) {
+  fake.store.set(`session:${fake.session}`, { session: fake.session, snapshot: true, next: 1, pending: [], ...overrides })
+}
+
 function binding(fake: ReturnType<typeof fakeThreads>) {
   return fake.store.get(`session:${fake.session}`) as any
 }
@@ -34,6 +48,14 @@ function binding(fake: ReturnType<typeof fakeThreads>) {
 async function startAuto($: Engine, fake: ReturnType<typeof fakeThreads>, source = 'startup') {
   await $.session.start(sessionStart)
   await $.classic.SessionStart({ session_id: fake.session, source, cwd: CHECKOUT, transcript_path: '' } as never)
+  await fake.clock.settle()
+  await fake.clock.advance(0)
+  await fake.clock.settle()
+}
+
+/** Run `/delta <args>` and let the share it starts on the clock finish. */
+async function runShare($: Engine, fake: ReturnType<typeof fakeThreads>, args: string) {
+  await $.command.run(typedDelta(args))
   await fake.clock.settle()
   await fake.clock.advance(0)
   await fake.clock.settle()
@@ -95,13 +117,13 @@ describe('automatic activation', () => {
     fake.expectClean()
   })
 
-  test('a CLI that speaks only contract 2 disables auto mode with a notice', async ($, on) => {
+  test('a CLI this plugin cannot record against leaves auto mode off and says which to update', async ($, on) => {
     const fake = fakeThreads(on)
-    fake.contractRange = { min: 1, max: 2 }
+    fake.contractRange = { min: 1, max: 3 }
     fake.files.set(POLICY, policy('private', 'org-1'))
     await startAuto($, fake)
     expect(fake.server.thread).toBeUndefined()
-    expect(fake.logs.join('\n')).toContain('must be updated for automatic uploads')
+    expect(fake.logs.join('\n')).toContain("This session isn't syncing: This Delta is too old for this plugin. Update Delta to continue.")
     expect(binding(fake)).toBeUndefined()
     fake.expectClean()
   })
@@ -165,6 +187,63 @@ describe('automatic activation', () => {
     fake.expectClean()
   })
 
+  test('the setup offer shows plain-text options, and quitting partway through setup offers it again', async ($, on) => {
+    const fake = fakeThreads(on)
+    const answers: ((value: unknown) => void)[] = []
+    fake.answerQuestion = () => new Promise((resolve) => { answers.push(resolve) })
+    await startAuto($, fake)
+    // Claude draws only plain-text options; an option it cannot read would show as nonsense or fail.
+    expect(fake.questions[0].questions[0].options.map((option: { label: string }) => option.label)).toEqual(['Set it up', 'Not now'])
+    answers[0]!({ result: { answers: { [fake.questions[0].questions[0].question]: 'Set it up' } } })
+    await fake.clock.settle()
+    // The wizard's first question is open and never answered.
+    expect(fake.questions).toHaveLength(2)
+    const offered = [...fake.store.keys()].find((key) => key.startsWith('setup-offered:'))!
+    expect(fake.store.get(offered)).toBe(true)
+    await $.session.end({ ...sessionEnd(fake.session), reason: 'prompt_input_exit' })
+    expect(fake.store.get(offered)).toBe(false)
+  })
+
+  const reminderCases: { name: string; source?: string; expected: ReminderKind; arrange?: (fake: ReturnType<typeof fakeThreads>) => void }[] = [
+    { name: 'an unconfigured checkout is told how to set up', expected: 'not set up' },
+    { name: 'a Manual checkout is told how to share, not to set up', expected: 'manual',
+      arrange: (fake) => { fake.files.set(POLICY, policy('manual')) } },
+    { name: 'a headless session gets none', expected: 'none', arrange: (fake) => { fake.surfaces = [] } },
+    { name: 'a session with an unfinished join gets none', source: 'resume', expected: 'none',
+      arrange: (fake) => { seedResumed(fake, { snapshot: false, joinTransition: { locator: 'x' } }) } },
+  ]
+  for (const { name, source, expected, arrange } of reminderCases) test(`band reminder: ${name}`, async ($, on) => {
+    const fake = fakeThreads(on)
+    fake.organizations = [{ id: 'org-1', name: 'Zed', current: true }]
+    fake.answerQuestion = async () => ({ result: { answers: {} } })
+    arrange?.(fake)
+    await startAuto($, fake, source)
+    expect(await reminderKind($)).toBe(expected)
+    // The reminder lives on the band; the transcript never carries a line that a later share makes stale.
+    expect(fake.logs.some((log) => log.includes('Not syncing') || log.includes('Not set up'))).toBe(false)
+  })
+
+  test('the band switches from its reminder to Syncing as soon as the session is shared, and stays so on resume', async ($, on) => {
+    const fake = fakeThreads(on)
+    fake.answerQuestion = async () => ({ result: { answers: {} } })
+    await startAuto($, fake)
+    expect(await reminderKind($)).toBe('not set up')
+    // The share's own question is answered as the fake answers it by default: with the organization.
+    fake.answerQuestion = undefined
+    // While the share runs, its progress takes the reminder's place.
+    await $.command.run(shareCommand)
+    expect(await reminderKind($)).toBe('none')
+    await fake.clock.settle()
+    await fake.clock.advance(0)
+    await fake.clock.settle()
+    expect(await reminderKind($)).toBe('none')
+    expect(await drawn($)).toContain('Syncing')
+    await $.session.end(sessionEnd(fake.session))
+    await startAuto($, fake, 'resume')
+    expect(await reminderKind($)).toBe('none')
+    expect(await drawn($)).toContain('Syncing')
+  })
+
   test('a session that ends during attach starts no watcher and gives no share advice', { timeoutMs: 15_000 }, async ($, on) => {
     const fake = fakeThreads(on)
     fake.files.set(POLICY, policy('private', 'org-1'))
@@ -181,7 +260,7 @@ describe('automatic activation', () => {
     release()
     await fake.clock.settle()
     expect(fake.watches).toHaveLength(0)
-    expect(fake.logs.join('\n')).not.toContain('/delta share')
+    expect(fake.logs.join('\n')).not.toContain('/delta-share')
     fake.expectClean()
   })
 })
@@ -195,7 +274,7 @@ describe('the band on an automatic session', () => {
     // status has no link. The upload is the band's operation, like a share's steps, so even a
     // one-row band shows it.
     await startAuto($, fake)
-    expect(await drawnInRows($, 1)).toContain('Waiting to upload…')
+    expect(await drawnInRows($, 1)).toContain('Waiting to sync…')
     // Delta registers the thread: the URL appears, but the content upload is still running, so the
     // first-upload operation stays on the band's row instead of moving to a hidden second row.
     fake.server.registered = true
@@ -204,8 +283,8 @@ describe('the band on an automatic session', () => {
     await drawn($)
     await fake.clock.settle()
     const registering = await drawnInRows($, 1)
-    expect(registering).toContain('Uploading to Delta…')
-    expect(registering).not.toContain('Uploaded to Delta')
+    expect(registering).toContain('Syncing to DeltaDB…')
+    expect(registering).not.toContain('Synced to DeltaDB')
     // Only Delta's confirmation of the content ends the first-upload operation.
     fake.server.confirmed = true
     await fake.clock.advance(2_000)
@@ -213,18 +292,38 @@ describe('the band on an automatic session', () => {
     await drawn($)
     await fake.clock.settle()
     const finished = await drawn($)
-    expect(finished).toContain('Uploaded to Delta')
+    expect(finished).toContain('Synced to DeltaDB')
     expect(finished).toContain(`https://delta.dev/join/${fake.shareId}`)
     expect(finished).toContain('Shared with Zed')
     await fake.clock.advance(5_000)
     await fake.clock.settle()
     const band = await drawn($)
     expect(band).toContain(`https://delta.dev/join/${fake.shareId}`)
-    expect(band).not.toContain('Uploaded to Delta')
+    expect(band).not.toContain('Synced to DeltaDB')
     // Organization mode reaches the organization through the upload, never through `thread share`.
     expect(fake.server.shared).toBe(false)
     fake.expectClean()
   })
+
+  for (const mode of ['organization', 'private'] as const) {
+    test(`a ${mode} thread in a personal organization is synced, never shared, and offers no share control`, async ($, on) => {
+      const fake = fakeThreads(on)
+      // The fake account's login is `tester`, so this is its personal organization by name.
+      fake.files.set(POLICY, policy(mode, 'org-p'))
+      fake.organizations = [{ id: 'org-1', name: 'Zed', current: true }, { id: 'org-p', name: "tester's Organization", current: false }]
+      fake.server.registered = true
+      fake.server.confirmed = true
+      await startAuto($, fake)
+      await drawn($)
+      await fake.clock.settle()
+      const band = await drawn($)
+      expect(band).toContain("Synced with tester's Organization")
+      expect(band).not.toContain('Shared with')
+      // A wide band has room for every control, so a share control would be drawn if offered.
+      expect(JSON.stringify(await $.ui.render({ ...abovePrompt, props: { ...abovePrompt.props, bodyColumns: 200 } }))).not.toContain('Share with')
+      fake.expectClean()
+    })
+  }
 
   test('a failed background upload shows its reason on the band', async ($, on) => {
     const fake = fakeThreads(on)
@@ -238,9 +337,9 @@ describe('the band on an automatic session', () => {
     await drawn($)
     await fake.clock.settle()
     const band = await drawn($)
-    expect(band).toContain('Upload failed: storage quota exceeded')
+    expect(band).toContain('Sync failed: storage quota exceeded')
     expect(band).toContain(`https://delta.dev/join/${fake.shareId}`)
-    expect(band).not.toContain('Uploaded to Delta')
+    expect(band).not.toContain('Synced to DeltaDB')
     fake.expectClean()
   })
 
@@ -259,10 +358,13 @@ describe('the band on an automatic session', () => {
     fake.expectClean()
   })
 
-  test('a private thread offers a share control that publishes the same thread', async ($, on) => {
+  test('a private thread is labelled with its own organization and offers a share control that publishes the same thread', async ($, on) => {
     const fake = fakeThreads(on)
-    fake.files.set(POLICY, policy('private', 'org-1'))
-    fake.organizations = [{ id: 'org-1', name: 'Zed', current: true }]
+    // The setting names an organization other than the current one, and status names none, as real
+    // CLIs have answered; the band still names the setting's.
+    fake.files.set(POLICY, policy('private', 'org-2'))
+    fake.organizations = [{ id: 'org-1', name: 'Zed', current: true }, { id: 'org-2', name: 'Personal', current: false }]
+    fake.server.reportsOrganization = false
     fake.server.registered = true
     fake.server.confirmed = true
     await startAuto($, fake)
@@ -270,10 +372,10 @@ describe('the band on an automatic session', () => {
     // The first draw reads the organization directory; the next one names it.
     await drawn($)
     await fake.clock.settle()
-    await drawn($)
+    expect(await drawn($)).toContain('Synced with Personal')
     await fake.clock.settle()
     const terminal = await $.ui.mount({ plugin: 'delta', surface: 'terminal', component: 'AbovePrompt', props: { ...abovePrompt.props } })
-    await terminal.find({ type: 'Button', label: 'Share with Zed' })
+    await terminal.find({ type: 'Button', label: 'Share with Personal' })
     await terminal.press({ key: 'share' })
     await fake.clock.settle()
     await fake.clock.advance(0)
@@ -571,7 +673,7 @@ describe('setup command and policy problems', () => {
     const broken = '{ not json'
     fake.files.set(POLICY, broken)
     await startAuto($, fake)
-    expect(fake.logs.join('\n')).toContain('could not be used')
+    expect(fake.logs.join('\n')).toContain("couldn't be used")
     expect(fake.files.get(POLICY)).toBe(broken)
     expect(fake.server.thread).toBeUndefined()
     expect(fake.operations()).not.toContain('create')
@@ -630,16 +732,114 @@ describe('setup dialogs and notices', () => {
     const fake = fakeThreads(on)
     fake.answerQuestion = (question: any) => {
       const text = question.questions[0].question
-      const answer = text.startsWith(`Write ${POLICY}`) ? 'Write it' : 'Private upload'
+      // Choose the team and the private option as the person would, by their offered labels.
+      const offered = question.questions[0].options.map((option: { label: string }) => option.label)
+      const answer = offered.find((label: string) => label === 'Zed' || label.startsWith('Private sync'))
+      return { result: { answers: { [text]: answer } } }
+    }
+    await $.session.start(sessionStart)
+    const { text } = await $.command.run({ ...typedDelta('setup') } as never)
+    expect(JSON.parse(fake.files.get(POLICY)!)).toEqual({ threads: { mode: 'private', organization: 'org-1' } })
+    // The setting starts with the next session, so the band now says this one isn't syncing.
+    expect(await reminderKind($)).toBe('manual')
+    // The answer names what was saved.
+    expect(text).toContain('Saved Private sync with Zed to .delta/settings.json')
+    fake.expectClean()
+  })
+
+  test('/delta setup offers to create an organization when the account has none, and syncs to it', async ($, on) => {
+    const fake = fakeThreads(on)
+    fake.organizations = []
+    fake.answerQuestion = (question: any) => {
+      const text = question.questions[0].question
+      const offered: string[] = question.questions[0].options.map((option: { label: string }) => option.label)
+      const answer = text.startsWith('Delta syncs your sessions into a team') ? 'Acme'
+        : text.startsWith('Invite teammates') ? 'Not now'
+        : offered.find((label) => label.startsWith('Private sync'))
       return { result: { answers: { [text]: answer } } }
     }
     await $.session.start(sessionStart)
     await $.command.run({ ...typedDelta('setup') } as never)
-    expect(JSON.parse(fake.files.get(POLICY)!)).toEqual({ threads: { mode: 'private', organization: 'org-1' } })
-    // The confirmation names the file, the mode, and the organization by name rather than its id.
-    expect(fake.questions.map((question: any) => question.questions[0].question)).toContain(
-      `Write ${POLICY} with recording set to Private upload, uploading to Zed? It is not committed.`)
+    expect(fake.commands.filter((argv) => argv.includes('create'))).toEqual([[expect.any(String), '--json', 'org', 'create', '--', 'Acme']])
+    expect(JSON.parse(fake.files.get(POLICY)!)).toEqual({ threads: { mode: 'private', organization: 'org-created' } })
     fake.expectClean()
+  })
+
+  test('/delta share in a Manual repository shares to its saved team, not the selected organization', async ($, on) => {
+    const fake = fakeThreads(on)
+    fake.files.set(POLICY, policy('manual', 'org-2'))
+    fake.organizations = [{ id: 'org-1', name: 'Zed', current: true }, { id: 'org-2', name: 'Acme', current: false }]
+    await $.session.start(sessionStart)
+    await fake.share($)
+    expect(fake.commands.find((argv) => argv.includes('create'))).toEqual(expect.arrayContaining(['--organization', 'org-2', '--visibility', 'private']))
+    expect(fake.server.shared).toBe(true)
+    await drawn($)
+    await fake.clock.settle()
+    expect(await drawn($)).toContain('Shared with Acme')
+    fake.expectClean()
+  })
+
+  test('/delta share asks who should see the session: "just me" syncs it privately without publishing', async ($, on) => {
+    const fake = fakeThreads(on)
+    fake.files.set(POLICY, policy('manual', 'org-2'))
+    fake.organizations = [{ id: 'org-1', name: 'Zed', current: true }, { id: 'org-2', name: 'Acme', current: false }]
+    fake.answerQuestion = (question: any) =>
+      ({ result: { answers: { [question.questions[0].question]: 'Just me (sync privately)' } } })
+    await $.session.start(sessionStart)
+    await runShare($, fake, 'share')
+    expect(fake.commands.find((argv) => argv.includes('create'))).toEqual(expect.arrayContaining(['--organization', 'org-2', '--visibility', 'private']))
+    expect(fake.server.upload).toEqual({ organization: 'org-2', visibility: 'private' })
+    expect(fake.operations()).not.toContain('share')
+    // Delta's background uploader now owns the session, as it does for Private sync.
+    expect(binding(fake)).toMatchObject({ thread: fake.threadId, autoUpload: { mode: 'private', organization: 'org-2' } })
+    expect(fake.live()?.ready).toBe(true)
+    fake.expectClean()
+  })
+
+  test('/delta share with addresses invites them without publishing', async ($, on) => {
+    const fake = fakeThreads(on)
+    fake.inviteFailures = { 'bo@example.com': 'already a member' }
+    await $.session.start(sessionStart)
+    await runShare($, fake, 'share ada@example.com, bo@example.com')
+    expect(fake.server.invited).toEqual(['ada@example.com', 'bo@example.com'])
+    expect(fake.operations()).not.toContain('share')
+    expect(fake.logs.join('\n')).toContain(`Invited ada@example.com to this session. Couldn't invite bo@example.com (already a member). Link: https://delta.dev/join/${fake.shareId}`)
+    expect(binding(fake)).toMatchObject({ url: `https://delta.dev/join/${fake.shareId}` })
+    // Keeping the audience of a thread whose audience Delta never reported, as after an interrupted
+    // invitation, reconnects it without publishing it to the team.
+    fake.store.set(`session:${fake.session}`, { ...binding(fake), visibility: undefined })
+    fake.answerQuestion = (question: any) =>
+      ({ result: { answers: { [question.questions[0].question]: 'Keep current sharing' } } })
+    await runShare($, fake, 'share')
+    expect(fake.operations()).not.toContain('share')
+    fake.expectClean()
+  })
+
+  test('dismissing the share question shares nothing', async ($, on) => {
+    const fake = fakeThreads(on, { messages: [{ role: 'user', content: [{ type: 'text', text: 'hello' }] }] })
+    fake.answerQuestion = () => ({ deny: 'dismissed' })
+    await $.session.start(sessionStart)
+    await runShare($, fake, 'share')
+    expect(fake.exports).toBe(0)
+    expect(fake.server.thread).toBeUndefined()
+    // The band drops the share's progress rather than reporting a failure.
+    expect(await drawn($)).not.toContain('Preparing to share')
+    expect(fake.logs.join('\n')).not.toContain('Delta sharing failed')
+    fake.expectClean()
+  })
+
+  test('a setup the startup offer opened updates the band once it saves', async ($, on) => {
+    const fake = fakeThreads(on)
+    fake.answerQuestion = (question: any) => {
+      const text = question.questions[0].question
+      const offered = question.questions[0].options.map((option: { label: string }) => option.label)
+      const answer = text.startsWith('Set up Delta syncing') ? 'Set it up'
+        : offered.find((label: string) => label === 'Zed' || label.startsWith('Manual'))
+      return { result: { answers: { [text]: answer } } }
+    }
+    await startAuto($, fake)
+    expect(JSON.parse(fake.files.get(POLICY)!)).toEqual({ threads: { mode: 'manual', organization: 'org-1' } })
+    expect(await reminderKind($)).toBe('manual')
   })
 
   test('the onboarding offer is shown once per repository, then never again', async ($, on) => {

@@ -66,7 +66,7 @@ describe('thread commands', () => {
     expect(fake.cliSetups).toEqual(['discover'])
     expect(fake.store.get(`session:${fake.session}`)).toEqual(binding)
     expect(fake.operations()).toEqual([])
-    expect(fake.logs.join('\n')).toContain('Run /delta share or /delta join')
+    expect(fake.logs.join('\n')).toContain('Run /delta-share or /delta-join')
   })
 
   test('first explicit share installs a missing CLI, never plugin load or contract failure', async ($, on) => {
@@ -109,7 +109,8 @@ describe('thread commands', () => {
     } else fake.cwd = change === 'Windows path spelling' ? 'C:/repo' : 'C:/different-checkout'
     release()
     await running
-    await fake.clock.settle()
+    // A continuing share has a whole chain of steps left to run.
+    await fake.settleUntil(() => change !== 'Windows path spelling' || fake.records().length > 0)
     if (change === 'Windows path spelling') {
       expect(fake.exports).toBe(1)
       expect(fake.server.shared).toBe(true)
@@ -221,26 +222,41 @@ describe('thread commands', () => {
     fake.expectClean()
   })
 
-  test('share without an interactive surface returns failures and confirmed success through the command', async ($, on) => {
+  test('share and join refuse a session without an interactive surface before contacting Delta', async ($, on) => {
     const fake = fakeThreads(on, { messages: [text('initial')] })
     fake.surfaces = []
     await $.session.start(sessionStart)
-    fake.commandFault = { operation: 'share', code: 'authentication_required', message: 'Sign in to Delta' }
-    expect(await $.command.run(shareCommand)).toEqual({
-      text: 'Delta sharing failed: DeltaCommandError: thread share: authentication_required: Sign in to Delta. Fix the issue and retry /delta share; saved records retain their sequence.',
-    })
+    for (const args of ['share', 'share ada@example.com', 'join some-link'])
+      expect((await $.command.run(typedDelta(args))).text).toContain('needs an interactive Claude Code terminal or Desktop Code tab')
+    await fake.clock.advance(0)
+    expect(fake.delta()).toEqual([])
+    expect(fake.exports).toBe(0)
+    fake.expectClean()
+  })
 
-    fake.commandFault = undefined
-    let release!: () => void
-    fake.holdAppend = new Promise<void>((resolve) => { release = resolve })
-    let completed = false
-    const result = $.command.run(shareCommand).then((result) => { completed = true; return result })
-    await fake.clock.settle()
-    expect(completed).toBe(false)
-    release()
-    expect(await result).toEqual({ text: `Delta share link: https://delta.dev/join/${fake.shareId}` })
-    // Completion releases the command's prompt gate without relying on a redraw or a timer.
-    expect((await $.prompt.submit(prompt('after sharing'))).drop).toBeUndefined()
+  test('each menu command runs its /delta form, and both forms keep working', async ($, on) => {
+    const fake = fakeThreads(on, { messages: [text('initial')] })
+    fake.surfaces = []
+    await $.session.start(sessionStart)
+    const run = (command: string, args: string) => $.command.run({ ...shareCommand, command, args } as never)
+    expect(await run('delta-org', 'current')).toEqual(await run('delta', 'org current'))
+    expect(await run('delta-setup', '')).toEqual(await run('delta', 'setup'))
+    // A menu command missing its argument explains that command's own format.
+    expect((await run('delta-join', '')).text).toContain('Usage: /delta-join <link>')
+    expect((await run('delta-org', '')).text).toContain('Usage: /delta-org list')
+    fake.surfaces = ['terminal']
+    for (const [command, args] of [['delta-share', ''], ['delta', 'share']]) {
+      const link = fake.waitForShareLink()
+      expect(await run(command!, args!)).toEqual({})
+      await fake.clock.advance(0)
+      expect(await link).toBe(`https://delta.dev/join/${fake.shareId}`)
+    }
+    expect(fake.commandRuns).toEqual([])
+    // Only the command a share reports tells Delta which form ran it.
+    expect(fake.cliIntegrations.filter((call) => call.commandForm)).toEqual([
+      { operation: 'share', integration: 'claude_code', commandForm: 'dedicated_command' },
+      { operation: 'share', integration: 'claude_code', commandForm: 'delta_subcommand' },
+    ])
     fake.expectClean()
     await $.session.end(sessionEnd(fake.session))
   })
@@ -251,7 +267,8 @@ describe('thread commands', () => {
     if (failure === 'record write') fake.failWrite = true
     else fake.failStoreSet = true
     expect(await fake.share($)).toContain('failed')
-    expect(fake.delta()).toEqual([])
+    // Naming the team in the share's question reads the organization list; nothing else runs.
+    expect(fake.delta().filter((argv) => argv[2] !== 'org')).toEqual([])
     expect(fake.watches).toEqual([])
     expect(fake.store.get(`session:${fake.session}`)).toBeUndefined()
     expect(fake.server.thread).toBeUndefined()
@@ -767,41 +784,6 @@ describe('thread commands', () => {
       fake.expectClean()
     })
 
-  test('legacy checkout adoption is unique within the thread and preserves the pending producer frontier', async ($, on) => {
-    const fake = fakeThreads(on, { messages: [text('pending')] })
-    await $.session.start(sessionStart)
-    fake.appendOffline = true
-    expect(await fake.share($)).toContain('failed')
-    await $.session.end(sessionEnd(fake.session))
-    const saved = structuredClone(fake.store.get(`session:${fake.session}`) as any)
-    delete saved.checkoutReference
-    // A resume clears the end marker, so it is not part of the preserved binding.
-    delete saved.endedAt
-    fake.store.set(`session:${fake.session}`, saved)
-    const worktrees = [
-      { reference: 'other#t=0', checkouts: [
-        { directory: '/other', state: 'attached' }, { directory: CHECKOUT, state: 'inactive' },
-      ] },
-      ...fake.state().worktrees.items,
-    ]
-    fake.statusPatch = { worktrees: { status: 'available', items: [...worktrees].reverse() } }
-    let release!: () => void
-    fake.holdAppend = new Promise<void>((resolve) => { release = resolve })
-    fake.appendOffline = false
-    const commands = fake.operations().length
-    await $.session.start(sessionStart)
-    await fake.clock.settle()
-    expect(fake.store.get(`session:${fake.session}`)).toEqual({
-      ...saved, checkoutReference: fake.server.mount!.reference,
-    })
-    expect(fake.records()).toEqual([])
-    expectNoSetupCommands(fake, commands)
-    release()
-    await fake.clock.settle()
-    expect(fake.records()).toMatchObject([{ sequence: 1, update: { content: [{ text: 'pending' }] } }])
-    fake.expectClean()
-  })
-
   test('unavailable inspection pauses participation and preserves binding and pending files across resume', async ($, on) => {
     const fake = fakeThreads(on, { messages: [text('one')] })
     await $.session.start(sessionStart)
@@ -1129,7 +1111,7 @@ describe('thread commands', () => {
   test('a CLI newer than this plugin asks the person to update the plugin', async ($, on) => {
     const fake = fakeThreads(on, { messages: [text('initial')] })
     await $.session.start(sessionStart)
-    fake.contractRange = { min: 6, max: 7 }
+    fake.contractRange = { min: 7, max: 8 }
     expect(await fake.share($)).toContain('Update the Delta plugin')
     expect(fake.server.thread).toBeUndefined()
     expect(fake.records()).toEqual([])
@@ -1138,7 +1120,6 @@ describe('thread commands', () => {
 
   test('a shared session records each new title once, a rename over Claude\'s own', async ($, on) => {
     const fake = fakeThreads(on, { messages: [text('initial')] })
-    fake.contractRange = { min: 1, max: 2 }
     await $.session.start(sessionStart)
     await fake.share($)
     const transcript = '/config/projects/repo/session.jsonl'
@@ -1172,7 +1153,6 @@ describe('thread commands', () => {
 
   test('a title still arrives when reading from an offset fails, and a missing transcript fails nothing', async ($, on) => {
     const fake = fakeThreads(on, { messages: [text('initial')] })
-    fake.contractRange = { min: 1, max: 2 }
     await $.session.start(sessionStart)
     await fake.share($)
     const transcript = '/config/projects/repo/session.jsonl'
@@ -1196,52 +1176,6 @@ describe('thread commands', () => {
     expect(fake.commands.filter((argv) => argv[0] === 'tail')).toHaveLength(tries)
     expect(fake.logs.join('\n')).not.toContain('title')
     expect((await $.prompt.submit(prompt('still sharing'))).drop).toBeUndefined()
-    fake.expectClean()
-  })
-
-  test('a CLI whose contract predates titles is never sent one', async ($, on) => {
-    const fake = fakeThreads(on, { messages: [text('initial')] })
-    fake.contractRange = { min: 1, max: 1 }
-    await $.session.start(sessionStart)
-    await fake.share($)
-    const transcript = '/config/projects/repo/session.jsonl'
-    fake.files.set(transcript, JSON.stringify({ type: 'ai-title', aiTitle: 'Fix the parser', sessionId: fake.session }) + '\n')
-    await $.classic.Stop({ transcript_path: transcript, stop_hook_active: false } as any)
-    await fake.clock.settle()
-    expect(fake.records().some((record) => record.update?.sessionUpdate === 'session_info_update')).toBe(false)
-    expect(fake.commands.some((argv) => argv[0] === 'tail')).toBe(false)
-    fake.expectClean()
-  })
-
-  test('a CLI that predates producer names watches passively and records unnamed, and a resumed session renegotiates', async ($, on) => {
-    const fake = fakeThreads(on, { messages: [text('initial')] })
-    fake.contractRange = { min: 1, max: 4 }
-    await $.session.start(sessionStart)
-    expect(await fake.share($)).toBe(`https://delta.dev/join/${fake.shareId}`)
-    expect(fake.watches.map((watch) => watch.argv.includes('--participate'))).toEqual([false])
-    // Everything contract 4 speaks still works; only the producer's name is left out, and nobody is told to update.
-    const transcript = '/config/projects/repo/session.jsonl'
-    fake.files.set(transcript, JSON.stringify({ type: 'ai-title', aiTitle: 'Fix the parser', sessionId: fake.session }) + '\n')
-    await $.classic.Stop({ transcript_path: transcript, stop_hook_active: false } as any)
-    await fake.clock.settle()
-    expect(fake.records().filter((record) => record.update?.sessionUpdate === 'session_info_update')
-      .map((record) => record.update!.title)).toEqual(['Fix the parser'])
-    expect(fake.producerNames().length).toBeGreaterThan(0)
-    expect(fake.producerNames().every((name) => name === undefined)).toBe(true)
-    expect(fake.logs.join('\n')).not.toContain('Update')
-    await $.session.end(sessionEnd(fake.session))
-    // Resuming against a Delta updated to contract 5 asks it again, and now the watch participates.
-    fake.contractRange = undefined
-    await $.session.start(sessionStart)
-    await fake.clock.settle()
-    expect(fake.watches.map((watch) => watch.argv.includes('--participate'))).toEqual([false, true])
-    expect(fake.contractChecks).toBe(2)
-    // Its appends now name the producer too.
-    const unnamed = fake.producerNames().length
-    await $.tool.call(bash('after-update', 'echo after update'))
-    await fake.clock.settle()
-    expect(fake.updates().map((record) => record.update?.toolCallId)).toContain('after-update')
-    expect([...new Set(fake.producerNames().slice(unnamed))]).toEqual(['Claude Code'])
     fake.expectClean()
   })
 
@@ -1275,7 +1209,7 @@ describe('thread commands', () => {
     await $.session.end(sessionEnd(fake.session))
     const watches = fake.watches.length
     // A resumed session re-checks; a Delta that now speaks only a newer contract blocks it.
-    fake.contractRange = { min: 6, max: 7 }
+    fake.contractRange = { min: 7, max: 8 }
     await $.session.start(sessionStart)
     expect(fake.store.get(`session:${fake.session}`)).toEqual(binding)
     expect(fake.watches.length).toBe(watches)
@@ -1297,17 +1231,17 @@ describe('thread commands', () => {
     const checksAtAppend: number[] = []
     fake.holdRun = (operation) => { if (operation === 'append') checksAtAppend.push(fake.contractChecks) }
     // An incompatible CLI is refused before anything is appended.
-    fake.contractRange = { min: 6, max: 7 }
+    fake.contractRange = { min: 7, max: 8 }
     await $.session.start(sessionStart)
     await fake.clock.settle()
     expect(checksAtAppend).toEqual([])
     expect(fake.logs.join('\n')).toContain('Update the Delta plugin')
     await $.session.end(sessionEnd(fake.session))
-    // Against contract 5 the recovered first record names the producer, since Delta keeps that name.
+    // Against a compatible CLI the recovered first record names the producer, since Delta keeps that name.
     fake.contractRange = undefined
     const checks = fake.contractChecks
     await $.session.start(sessionStart)
-    await fake.clock.settle()
+    await fake.settleUntil(() => checksAtAppend.length > 0)
     expect(checksAtAppend).toEqual([checks + 1])
     expect(fake.producerNames()).toEqual(['Claude Code'])
     expect(fake.store.get(`session:${fake.session}`)).toMatchObject({ pending: [] })
@@ -1321,7 +1255,7 @@ describe('thread commands', () => {
     await $.session.end(sessionEnd(fake.session))
     await seedPending(fake, [{ schemaVersion: 1, sequence: 1, update: { sessionUpdate: 'state_update', state: 'idle' } }])
     fake.store.set(`session:${fake.session}`, { ...fake.store.get(`session:${fake.session}`) as object, snapshot: false })
-    // Recovery asks a contract-4 CLI, and the session ends and resumes before the answer arrives.
+    // Recovery asks a CLI too old for this plugin, and the session ends and resumes before the answer arrives.
     let answer!: () => void
     const held = new Promise<void>((resolve) => { answer = resolve })
     fake.holdRun = (operation) => {
@@ -1337,8 +1271,8 @@ describe('thread commands', () => {
     const checks = fake.contractChecks
     await $.session.start(sessionStart)
     answer()
-    await fake.clock.settle()
-    // The resumed session asked again and appended once, as contract 5.
+    await fake.settleUntil(() => fake.producerNames().length > 0)
+    // The stale refusal is neither remembered nor shown: the resumed session asked again and appended once.
     expect(fake.contractChecks).toBe(checks + 1)
     expect(fake.producerNames()).toEqual(['Claude Code'])
     expect(fake.store.get(`session:${fake.session}`)).toMatchObject({ pending: [] })
@@ -1780,7 +1714,7 @@ describe('remote activity', () => {
     const watches = fake.watches.length
     await fake.clock.advance(120_000)
     expect(fake.watches.length).toBe(watches)
-    expect(fake.logs.some((log) => log.includes('not_visible (thread_gone)') && log.includes('/delta share'))).toBe(true)
+    expect(fake.logs.some((log) => log.includes('not_visible (thread_gone)') && log.includes('/delta-share'))).toBe(true)
     expect(JSON.stringify(await $.ui.render(abovePrompt))).toContain('not_visible')
     // A delivery pause stops delivery, not Claude: the prompt is accepted while the reason stays shown.
     expect((await $.prompt.submit(prompt('after deletion'))).drop).toBeUndefined()
@@ -1817,21 +1751,6 @@ describe('remote activity', () => {
     fake.expectClean()
   })
 
-
-  test('malformed watch output surfaces failure and reconnects', async ($, on) => {
-    const fake = fakeThreads(on)
-    // Contract 2 keeps this test on the server-confirmed path: a prompt waits for the watcher.
-    fake.contractRange = { min: 1, max: 2 }
-    await $.session.start(sessionStart)
-    await fake.share($)
-    fake.live()!.write('{"type":"item","item":{"id":""}}\n')
-    await fake.clock.settle()
-    expect(fake.logs.some((log) => log.startsWith('Connection interrupted'))).toBe(true)
-    expect((await $.prompt.submit(prompt('invalid'))).drop).toBeDefined()
-    await fake.clock.advance(1000)
-    expect((await $.prompt.submit(prompt('ready after automatic reconnect'))).drop).toBeUndefined()
-    fake.expectClean()
-  })
 
   test('incoming activity never executes or starts a turn, and the band shows only status', async ($, on) => {
     const fake = fakeThreads(on, { messages: [text('one')] })
@@ -2322,56 +2241,6 @@ describe('native turns', () => {
     fake.expectClean()
   })
 
-  test('old mixed pending records translate without sequence reset across partial receipts and restart', async ($, on) => {
-    const fake = fakeThreads(on)
-    await $.session.start(sessionStart)
-    await fake.share($)
-    await $.session.end(sessionEnd(fake.session))
-    const records = [
-      { schemaVersion: 1, sequence: 1, update: { sessionUpdate: 'state_update', state: 'idle' } },
-      { schemaVersion: 1, sequence: 2, turn: { action: 'claim' } },
-      { schemaVersion: 1, sequence: 3, claim: 2, update: { sessionUpdate: 'agent_message', messageId: 'first', content: [{ type: 'text', text: 'first' }] } },
-      { schemaVersion: 1, sequence: 4, claim: 2, update: { sessionUpdate: 'agent_message', messageId: 'second', content: [{ type: 'text', text: 'second' }] } },
-      { schemaVersion: 1, sequence: 5, turn: { action: 'end', claim: 2 } },
-      { schemaVersion: 1, sequence: 6, claim: 2, update: { sessionUpdate: 'agent_message', content: [{ type: 'text', text: 'late' }] } },
-    ]
-    await seedPending(fake, records, { claim: 2, endSequence: 5 })
-    const immutable = new Map(fake.files)
-    fake.appendFaults.push({ accept: 3, exitCode: 1, stderr: 'partial content' })
-    await $.session.start(sessionStart)
-    await fake.clock.settle()
-    let saved = fake.store.get(`session:${fake.session}`) as any
-    expect(saved.pending.map((entry: any) => entry.sequence)).toEqual([4, 5, 6])
-    expect(saved.execution).toBeUndefined()
-    expect(fake.records().map((record) => record.sequence)).toEqual([1, 2, 3])
-    expect(fake.finishes()).toEqual([])
-    for (const entry of saved.pending)
-      for (const file of entry.files) expect(fake.files.get(file)).toBe(immutable.get(file))
-
-    fake.appendFaults.push({ throwAfterAccept: true })
-    expect(await fake.share($)).toContain('failed')
-    saved = fake.store.get(`session:${fake.session}`) as any
-    expect(saved.pending.map((entry: any) => entry.sequence)).toEqual([4, 5, 6])
-    expect(saved.execution).toBeUndefined()
-    expect(fake.records().map((record) => record.sequence)).toEqual([1, 2, 3, 4, 5, 6])
-    await $.session.end(sessionEnd(fake.session))
-    await $.session.start(sessionStart)
-    await fake.clock.settle()
-    saved = fake.store.get(`session:${fake.session}`) as any
-    expect(saved).toMatchObject({ next: 7, pending: [] })
-    expect(saved.execution).toBeUndefined()
-    expect(fake.records()[0]).toEqual(records[0])
-    expect(fake.records()[1]).toEqual({
-      schemaVersion: 1, sequence: 2, turnSequence: 2, update: { sessionUpdate: 'state_update', state: 'running' },
-    })
-    expect(fake.records()[2]).toMatchObject({ sequence: 3, turnSequence: 2, update: records[2]!.update })
-    expect(fake.starts()).toEqual([2])
-    expect(fake.finishes()).toEqual([2])
-    expect(fake.records().find((record) => record.sequence === 6)?.turnSequence).toBe(2)
-    expect(fake.entered).toEqual([])
-    fake.expectClean()
-  })
-
   test('a malformed lifecycle receipt leaves its pending start unchanged without blocking entry', async ($, on) => {
     const fake = fakeThreads(on)
     await $.session.start(sessionStart)
@@ -2521,29 +2390,6 @@ describe('native turns', () => {
     fake.expectClean()
   })
 
-  test('queued lifecycle survives disconnect and reconnect without replaying a prompt', async ($, on) => {
-    const fake = fakeThreads(on, { messages: [text('one')] })
-    // Contract 2 aborts a turn the watcher's loss orphans; offline recording does not.
-    fake.contractRange = { min: 1, max: 2 }
-    await $.session.start(sessionStart)
-    await fake.share($)
-    fake.appendOffline = true
-    expect((await $.prompt.submit(prompt('offline'))).drop).toBeUndefined()
-    await $.turn.start(turnStart('native-offline'))
-    fake.live()!.exit(1)
-    await fake.clock.settle()
-    expect(fake.aborts).toEqual(['native-offline'])
-    // Observing turn.abort does not mean its asynchronous finish is persisted.
-    // The host's aborted completion provides the durable lifecycle boundary.
-    await $.turn.complete(turnComplete('native-offline', 'aborted'))
-    expect((fake.store.get(`session:${fake.session}`) as any).pending).toHaveLength(2)
-    fake.appendOffline = false
-    await fake.clock.advance(60_000)
-    expect(fake.finishes()).toEqual(fake.starts())
-    expect(fake.entered).toHaveLength(1)
-    fake.expectClean()
-  })
-
   test('ownership loss aborts exactly the bound native turn and fences its later output', async ($, on) => {
     const fake = fakeThreads(on, { messages: [text('one')] })
     await $.session.start(sessionStart)
@@ -2655,41 +2501,6 @@ describe('native turns', () => {
     fake.expectClean()
   })
 
-  test('a disconnected observer held in abort cannot corrupt a restarted live observer or its ready gate', async ($, on) => {
-    const fake = fakeThreads(on, { messages: [text('one')] })
-    // Contract 2 aborts the orphaned turn; offline recording leaves it running.
-    fake.contractRange = { min: 1, max: 2 }
-    await $.session.start(sessionStart)
-    await fake.share($)
-    await $.prompt.submit(prompt('owned'))
-    await $.turn.start(turnStart('native-held-abort', 'owned'))
-    let release!: () => void
-    fake.holdAbort = new Promise<void>((resolve) => { release = resolve })
-    fake.live()!.exit(1)
-    await fake.clock.settle()
-    expect(fake.aborts).toEqual(['native-held-abort'])
-    // The old abort is still held, but completion and a new observer can proceed.
-    fake.holdAbort = undefined
-    await $.turn.complete(turnComplete('native-held-abort', 'aborted'))
-    await $.session.end(sessionEnd(fake.session))
-    fake.server.items.set('fresh', remoteItem('New observer live snapshot', { id: 'fresh' }))
-    await $.session.start(sessionStart)
-    await fake.clock.settle()
-    await redraw($)
-    const live = fake.live()!
-    // A press handle is new with every draw; the band is otherwise the same.
-    const drawnBand = async () => JSON.stringify(await $.ui.render(abovePrompt)).replace(/"handle":\d+/g, '')
-    const band = await drawnBand()
-    expect(band).toContain(LIVE)
-    release()
-    await fake.clock.settle()
-    await redraw($)
-    expect(await drawnBand()).toBe(band)
-    expect((await $.prompt.submit(prompt('new observer still ready'))).drop).toBeUndefined()
-    expect(fake.live()).toBe(live)
-    fake.expectClean()
-  })
-
   test('an observer loss queued across session end cannot write or abort the restarted execution', async ($, on) => {
     const fake = fakeThreads(on, { messages: [text('one')] })
     await $.session.start(sessionStart)
@@ -2796,19 +2607,19 @@ describe('the status band', () => {
   test('child updates preserve siblings and reconnect replaces the inventory while the parent is idle', async ($, on) => {
     const fake = fakeThreads(on)
     fake.server.children = [
-      { thread_id: 'child-one', kind: 'subagent', name: 'Scout', status: 'queued' },
-      { thread_id: 'sibling', kind: 'subthread', name: 'Sibling', status: 'inactive' },
+      { thread_id: 'child-one', reference: 'thread#s=child-one', kind: 'subagent', name: 'Scout', status: 'queued' },
+      { thread_id: 'sibling', reference: 'thread#s=sibling', kind: 'subthread', name: 'Sibling', status: 'inactive' },
     ]
     await $.session.start(sessionStart)
     await fake.share($)
     await fake.clock.settle()
     expect(await drawn($)).toContain('queued')
-    fake.child({ thread_id: 'child-one', kind: 'subagent', name: 'Scout', status: 'running' })
+    fake.child({ thread_id: 'child-one', reference: 'thread#s=child-one', kind: 'subagent', name: 'Scout', status: 'running' })
     await fake.clock.settle()
     expect(await drawn($)).toContain('running')
     expect(await drawn($)).toContain('1 inactive')
     expect(await drawn($)).not.toContain('queued')
-    fake.child({ thread_id: 'new-child', kind: 'future_kind', name: 'New', status: 'running' })
+    fake.child({ thread_id: 'new-child', reference: 'thread#s=new-child', kind: 'future_kind', name: 'New', status: 'running' })
     await fake.clock.settle()
     expect(await drawn($)).toContain('+1 running')
     fake.removeChild('child-one')
@@ -2821,7 +2632,7 @@ describe('the status band', () => {
     expect(await drawn($)).toContain('unknown')
     let releaseChildren!: () => void
     fake.holdChildren = new Promise<void>((resolve) => { releaseChildren = resolve })
-    fake.server.children = [{ thread_id: 'child-two', kind: 'subthread', name: 'Review', status: 'failed' }]
+    fake.server.children = [{ thread_id: 'child-two', reference: 'thread#s=child-two', kind: 'subthread', name: 'Review', status: 'failed' }]
     await fake.clock.advance(1000)
     // Readiness clears the previous connection's inventory even when discovery is delayed.
     expect(await drawn($)).not.toContain('New')
@@ -3014,13 +2825,12 @@ describe('the status band', () => {
     // A survey owns the band, and with no room at all the band is the host's.
     expect(JSON.stringify(await (await mount('terminal', { hasSurvey: true })).drawn())).not.toContain('Delta')
     expect(JSON.stringify(await (await mount('terminal', { maxRows: 0 })).drawn())).not.toContain('Delta')
-    // The terminal shades the row and shows the URL as text: a terminal without hyperlinks would
-    // draw a Link's URL twice. Pressing copy puts the whole link on the clipboard, and says so
-    // only once the clipboard took it.
+    // The terminal shades the row and draws the URL as an unlabelled hyperlink: a labelled one prints
+    // the URL twice in a terminal Claude does not treat as hyperlink-capable. Pressing copy puts the
+    // whole link on the clipboard, and says so only once the clipboard took it.
     const terminal = await mount('terminal')
     expect(JSON.stringify(await terminal.drawn())).toContain('"backgroundColor":"#303030"')
-    expect(await terminal.find({ type: 'Link' })).toBeUndefined()
-    expect(await terminal.find({ type: 'Text', text: link })).toBeDefined()
+    expect((await terminal.find({ type: 'Link' }))?.props).toEqual({ href: link })
     await terminal.press({ key: 'copy' })
     expect(copied).toEqual([link])
     await fake.clock.settle()

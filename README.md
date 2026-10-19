@@ -22,39 +22,47 @@ to sign in. On Windows, install Delta from [delta.dev](https://delta.dev) first.
 
 ### Setup
 
-Run `/delta setup` in a repository to choose its recording policy:
+Run `/delta-setup` in a repository to choose its team and which sessions sync:
 
-- **Manual**: a session is only recorded when you run `/delta share`.
-- **Private upload**: every new session is recorded automatically, and only you
-  can see it until you share it.
-- **Organization sharing**: every new session is recorded automatically and
-  shared with your organization.
+- **Private sync**: every new session syncs, and only you can see it until you
+  share it.
+- **Organization sharing**: every new session syncs and is shared with your team.
+- **Manual**: a session syncs only when you run `/delta-share`.
 
-Setup writes the policy to `.delta/settings.json`. Commit that file to apply the
-policy to everyone who uses the plugin in the repository.
+Setup can create a team and invite teammates by email. It saves your choice to
+`.delta/settings.json` and keeps that file out of Git, since the choice is yours.
+
+### Sharing
+
+`/delta-share` asks who should see the session: your team, just you, or people
+you name by email address. `/delta-share ada@example.com` invites them directly.
 
 ### Commands
 
+Each command also works as `/delta <command>`, such as `/delta share`.
+
 | Command | Description |
 | --- | --- |
-| `/delta share` | Share the current session and its checkout with your organization |
-| `/delta join <link>` | Join a shared thread in a fresh session, in the thread's checkout |
-| `/delta setup` | Choose this repository's recording policy |
-| `/delta org list` | List your Delta organizations |
-| `/delta org current` | Show the selected organization |
-| `/delta org switch <ID>` | Select a different organization |
+| `/delta-share [<email>…]` | Sync the current session and its checkout, and choose who sees it |
+| `/delta-join <link>` | Join a shared thread in a fresh session, in the thread's checkout |
+| `/delta-setup` | Choose this repository's team and which sessions sync |
+| `/delta-org list` | List your Delta organizations |
+| `/delta-org current` | Show the selected organization |
+| `/delta-org switch <ID>` | Select a different organization |
+| `/delta-org invite <email>…` | Invite people to the selected organization |
+
+Sharing and joining need an interactive Claude Code terminal or Desktop Code tab.
 
 ## Privacy
 
 Delta stores what a recorded session contains: your conversation, including tool
 inputs and outputs and Claude's thinking, plus the files in your checkout
 (staged, unstaged, and untracked files that aren't ignored). Nothing is uploaded
-until you share or join a session, or the repository's policy records it
+until you share or join a session, or the repository's setting syncs it
 automatically.
 
-With an updated Delta CLI and client, a shared or joined session can show you
-as connected through Claude Code. An open Delta view takes precedence; older
-CLIs continue working without publishing this presence.
+A shared or joined session shows you as connected through Claude Code. An open
+Delta view takes precedence.
 
 The plugin sends product telemetry to Delta: which integration ran each
 command, the plugin version, and when turns start and finish and how they ended.
