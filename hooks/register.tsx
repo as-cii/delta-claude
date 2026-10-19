@@ -28,7 +28,7 @@ import { TitleScanner, transcriptRead } from './title'
 import { policyPath, readProjectPolicy, recordsAutomatically, type ProjectPolicy } from './project-policy'
 import {
   DASHBOARD_URL, HEADLESS_REFUSAL, InteractionDismissed, InteractionUnavailable, createdOrganizationFrom, emailsIn, invitationSummary, inviteResultsFrom, isPersonalOrganization, membersUrl, offerOnboarding,
-  organizationsFrom, releaseOnboarding, runSetupWizard,
+  organizationsFrom, releaseOnboarding, remoteRefusal, runSetupWizard,
   type Interaction, type OnboardingStore, type Organization, type SetupEnv,
 } from './setup'
 import { DeltaCli } from './cli'
@@ -141,7 +141,13 @@ type JoinRequest = { session: string; cwd: string; locator: string; fresh?: stri
  * addresses typed after `/delta share`, or else the person's answer. Without it, it shares with the
  * organization, as the band's control and setup's offer ask.
  */
-type ShareRequest = { session: string; cwd: string; cancelled?: boolean; form?: CommandForm; choose?: { emails: string[] } }
+/**
+ * A share to run. `choose` asks who should see the session; otherwise `audience` decides, and with
+ * neither it is shared with the organization.
+ */
+type ShareRequest = {
+  session: string; cwd: string; cancelled?: boolean; form?: CommandForm; choose?: { emails: string[] }; audience?: ShareAudience
+}
 /** How a person ran a share or join: `/delta share` (`delta_subcommand`) or `/delta-share` (`dedicated_command`). */
 type CommandForm = 'delta_subcommand' | 'dedicated_command'
 
@@ -192,8 +198,8 @@ let pluginData = ''
 let outbox = ''
 let joining: JoinRequest | undefined
 let sharing: ShareRequest | undefined
-/** The session whose share the band asked for while its turn ran; it starts when the turn ends. */
-let shareAfterTurn: string | undefined
+/** A share asked for while its session's turn ran, and for whom; it starts when the turn ends. */
+let shareAfterTurn: { session: string; audience?: ShareAudience } | undefined
 /** A Keep or Discard the band started, so its two controls cannot both run at once. */
 let resolving = false
 /**
@@ -937,7 +943,7 @@ async function statusView($: Runtime): Promise<StatusState> {
     // Sharing waits for Claude's turn to finish, so the control says so rather than ignoring a press.
     // A personal organization has nobody to share with, so its threads offer no share control.
     share: binding?.visibility === 'private' && !personalOrganizationIds.has(threadOrganization(binding) ?? currentOrganizationId ?? '') ? {
-      label: shareAfterTurn === active && state?.currentTurnId ? 'Sharing after this turn'
+      label: shareAfterTurn?.session === active && state?.currentTurnId ? 'Sharing after this turn'
         : state?.currentTurnId ? 'Share after this turn'
         : `Share with ${organizationName(threadOrganization(binding)) ?? 'organization'}`,
     } : undefined,
@@ -962,7 +968,7 @@ function audienceLabel(binding: Binding | undefined): string | undefined {
   if (!binding?.visibility) return undefined
   if (binding.visibility === 'unlisted') return 'Unlisted'
   const organization = threadOrganization(binding) ?? currentOrganizationId
-  const name = organizationName(organization) ?? 'your organization'
+  const name = organizationName(organization) ?? 'your team'
   return binding.visibility === 'private' || personalOrganizationIds.has(organization ?? '')
     ? `Synced with ${name}` : `Shared with ${name}`
 }
@@ -1686,12 +1692,12 @@ async function organizationCommand($: Runtime, args: string[]) {
     const executable = await resolveCli($)
     const result = await $.process.run([executable, 'org', ...args], { timeoutMs: 120_000 })
     if (result.isStdoutTruncated || result.isStderrTruncated)
-      throw new Error('Delta organization output was truncated; check the selection with /delta-org current.')
+      throw new Error('Delta team output was truncated; check the selection with /delta-org current.')
     if (result.exitCode !== 0)
       throw new Error(result.stderr.trim() || result.stdout.trim() || `Delta exited with code ${result.exitCode}`)
     return { text: result.stdout.trim() }
   } catch (error) {
-    return { text: `Delta organization command failed: ${String(error)}` }
+    return { text: `Delta team command failed: ${String(error)}` }
   }
 }
 
@@ -3425,13 +3431,17 @@ async function share($: Runtime, request: ShareRequest): Promise<ShareOutcome> {
   binding = await serial(() => load($, session))
   if (runtime.captureFailure || binding.captureFailure)
     throw new Error(`a stored Claude row could not be saved locally (${runtime.captureFailure ?? binding.captureFailure}); sharing is paused to avoid an incomplete transcript`)
+  // A repository Delta can't identify fails at the attach, after everything else; say so before asking.
+  const unidentified = remoteRefusal(await gitRemotes($, await checkoutRoot($)), '/delta-share')
+  if (unidentified) throw new ShareRefusal(unidentified)
   // Refuse a CLI this plugin cannot record against before its snapshot fills the local outbox.
   await resolveCli($, true)
   await assertShareSession($, request)
   await requireContract($, session)
   await assertShareSession($, request)
   // Asked before anything is staged, so declining leaves the session exactly as it was.
-  const chosen: ShareAudience | string = request.choose ? await chooseAudience($, session, request.choose.emails) : { kind: 'organization' }
+  const chosen: ShareAudience | string = request.choose
+    ? await chooseAudience($, session, request.choose.emails) : request.audience ?? { kind: 'organization' }
   if (typeof chosen === 'string') return chosen ? { notice: chosen } : {}
   const audience = chosen
   await assertShareSession($, request)
@@ -3513,7 +3523,7 @@ async function share($: Runtime, request: ShareRequest): Promise<ShareOutcome> {
     const organization = (binding.thread ? threadOrganization(binding) : undefined) ?? await savedOrganization($, root) ??
       (privateUpload ? currentOrganizationId : undefined)
     if (privateUpload && !organization)
-      throw new Error('Delta has no organization to sync this session to; check /delta-org list')
+      throw new Error('Delta has no team to sync this session to; check /delta-org list')
     // Creation is idempotent: for a thread that already exists, it only records the private upload.
     const created = await command($, ['thread', 'create', '--source', 'claude-code', '--external-id', session,
       ...organization ? ['--organization', organization, '--visibility', 'private'] : []], 'thread create', check)
@@ -3628,7 +3638,16 @@ class ShareRefusal extends Error {
 /** What a failed share tells the person: why, and what to retry. */
 function shareFailureText(error: unknown, retry: string): string {
   if (error instanceof ShareRefusal) return `Delta didn't share this session: ${error.message}.`
-  return `Delta sharing failed: ${String(error)}. Fix the issue and retry ${retry}; saved records retain their sequence.`
+  // The message alone, without the error's class name or a second full stop after its own.
+  const reason = (error instanceof Error ? error.message : String(error)).replace(/[.\s]+$/, '')
+  return `Delta sharing failed: ${reason}. Fix the issue and retry ${retry}; saved records retain their sequence.`
+}
+
+/** A checkout's Git remote names, or undefined when Git cannot list them. */
+async function gitRemotes($: Runtime, root: string): Promise<string[] | undefined> {
+  const result = await $.process.run(['git', 'remote'], { cwd: root }).catch(() => undefined)
+  if (!result || result.exitCode !== 0 || result.isStdoutTruncated) return undefined
+  return result.stdout.split('\n').map((name) => name.trim()).filter(Boolean)
 }
 
 function joinedCheckoutRefusal(root: string, joined: Binding): string {
@@ -4389,6 +4408,12 @@ function setupEnv($: Runtime): SetupEnv {
         return /^(?:\/|[A-Za-z]:[\\/]|\\\\)/.test(lines[0]) ? lines[0] : `${root}/${lines[0]}`
       } catch { return undefined }
     },
+    remotes: async () => gitRemotes($, await checkoutRoot($)),
+    // Opening links from a plugin needs macOS's `open`; anywhere else the person opens it.
+    openLink: async (url) => {
+      const opened = await $.process.run(['open', url], { timeoutMs: 10_000 }).catch(() => undefined)
+      return opened?.exitCode === 0
+    },
     contract: async () => {
       let progress: typeof feed.progress
       try {
@@ -4418,11 +4443,12 @@ function setupEnv($: Runtime): SetupEnv {
     writeFile: (path, text) => $.fs.write(path, text) as Promise<void>,
     // A joined thread is someone else's shared thread; an organization or unlisted one is already
     // visible beyond this account.
-    sessionShared: async () => {
+    sessionAudience: async () => {
       const binding = stateFor(await $.session.id()).binding
-      return !!binding?.joined || (!!binding?.visibility && binding.visibility !== 'private')
+      if (binding?.joined || (binding?.visibility && binding.visibility !== 'private')) return 'shared'
+      return sessionSyncs(binding) ? 'private' : 'none'
     },
-    shareSession: async () => beginShare($, await $.session.id()),
+    shareSession: async (audience) => beginShare($, await $.session.id(), { kind: audience }),
   }
 }
 
@@ -4432,19 +4458,53 @@ function setupEnv($: Runtime): SetupEnv {
  */
 let ownQuestions = 0
 
+/**
+ * The option hints of the plugin's own open questions, by question text. `$.ui.ask` takes labels
+ * only, so the `AskUserQuestion` render hook adds these as the options' descriptions.
+ */
+const questionHints = new Map<string, Readonly<Record<string, string>>>()
+
+/**
+ * Add the hints of the plugin's own open questions to the dialog's options, as their descriptions.
+ * Claude Code draws the original when a rewrite doesn't fit the question's schema, so anything
+ * unexpected is passed on unchanged; another plugin's or Claude's own question has no hints.
+ */
+function withQuestionHints(questions: unknown[]): unknown[] | undefined {
+  let changed = false
+  const hinted = questions.map((question) => {
+    const hints = questionHints.get((question as { question?: unknown })?.question as string)
+    const options = (question as { options?: unknown })?.options
+    if (!hints || !Array.isArray(options)) return question
+    changed = true
+    return {
+      ...question as object,
+      options: options.map((option) => {
+        const hint = hints[(option as { label?: string })?.label ?? '']
+        return hint ? { ...option, description: hint } : option
+      }),
+    }
+  })
+  return changed ? hinted : undefined
+}
+
 /** The interactive surface the wizard speaks through: `$.ui.ask`, when this Claude build has it. */
 function claudeInteraction($: Runtime): Interaction {
   return {
     async ask(question, options) {
       let answer: unknown
+      const { descriptions, ...asked } = Array.isArray(options) ? { options } as { options: readonly string[]; descriptions?: undefined } : options
       ownQuestions++
-      try { answer = await $.ui.ask(question, options as never) }
+      if (descriptions) questionHints.set(question, descriptions)
+      try { answer = await $.ui.ask(question, asked as never) }
       catch (error) {
         // A missing method is a build without the question API; a dismissed dialog rejects too.
         if (error instanceof TypeError) throw new InteractionUnavailable(String(error))
         throw new InteractionDismissed(String(error))
       }
-      finally { ownQuestions-- }
+      finally {
+        ownQuestions--
+        if (questionHints.get(question) === descriptions) questionHints.delete(question)
+      }
       if (answer === undefined || answer === null || answer === '') throw new InteractionDismissed('dismissed')
       if (typeof answer === 'string') return answer
       const wrapped = answer as { label?: string; value?: string }
@@ -4621,9 +4681,11 @@ async function captureDecided(session: string): Promise<void> {
 /**
  * Read a checkout's policy at a session's start: show a policy problem once, auto-activate a new
  * session when the policy records automatically, and offer setup when nothing configures the repo.
+ * A running session the plugin was just loaded into (`loadedMidSession`) is offered setup like a
+ * new one but never auto-activated, since part of it already happened unrecorded.
  * Everything here runs off the startup hook's critical path.
  */
-async function startSession($: Runtime, session: string) {
+async function startSession($: Runtime, session: string, loadedMidSession = false) {
   const env = setupEnv($)
   const newSession = newSessionFor(session)
   let root: string
@@ -4654,7 +4716,8 @@ async function startSession($: Runtime, session: string) {
   $.ui.invalidate('ui.render')
   try {
     await offerOnboarding(env, claudeInteraction($), onboardingStore($), {
-      root, configured: policy.configured, newSession, joined: !!stateFor(session).binding?.joined, joining: !!joining,
+      root, configured: policy.configured, newToPlugin: newSession || loadedMidSession,
+      joined: !!stateFor(session).binding?.joined, joining: !!joining,
     }, (key) => { openOnboarding.set(session, key) })
   } finally {
     openOnboarding.delete(session)
@@ -4832,8 +4895,8 @@ const SIGNED_OUT_REFUSAL: ActivationRefusal = {
 function notMemberRefusal(organization: string): ActivationRefusal {
   const name = organizationName(organization)
   return {
-    band: "Not syncing: your Delta account isn't in this repo's organization · /delta-share",
-    transcript: `This repository syncs sessions to ${name ? `${name} (${organization})` : organization}, which your Delta account isn't a member of, so this session isn't syncing. Use /delta-share to share it with your own organization, ask to be added to ${name ?? 'that organization'}, or run /delta-setup if the settings name the wrong organization.`,
+    band: "Not syncing: your Delta account isn't in this repo's team · /delta-share",
+    transcript: `This repository syncs sessions to ${name ? `${name} (${organization})` : organization}, which your Delta account isn't a member of, so this session isn't syncing. Use /delta-share to share it with your own team, ask to be added to ${name ?? 'that team'}, or run /delta-setup if the settings name the wrong team.`,
   }
 }
 
@@ -4933,14 +4996,14 @@ async function pruneStore($: Runtime) {
 }
 
 /** Begin the same publication flow `/delta share` runs, for the band's share control. */
-function beginShare($: Runtime, session: string): boolean {
+function beginShare($: Runtime, session: string, audience?: ShareAudience): boolean {
   if (sharing) return false
   if (stateFor(session).currentTurnId) {
-    shareAfterTurn = session
+    shareAfterTurn = { session, ...audience ? { audience } : {} }
     $.ui.invalidate('ui.render')
     return true
   }
-  const request: ShareRequest = { session, cwd: '' }
+  const request: ShareRequest = { session, cwd: '', ...audience ? { audience } : {} }
   sharing = request
   setProgress($, 'Preparing to share…', 'active', [1, 5])
   $.clock.after(0, async () => {
@@ -5028,7 +5091,7 @@ async function chooseAudience($: Runtime, session: string, typed: string[]): Pro
     await savedOrganization($, await checkoutRoot($)) ?? currentOrganizationId
   // A personal organization has nobody to share with, and a thread already shared with its organization stays shared.
   const team = personalOrganizationIds.has(organization ?? '') || binding?.visibility === 'organization' ? undefined
-    : organizationName(organization) ?? 'your organization'
+    : organizationName(organization) ?? 'your team'
   try {
     return await chooseShareAudience(claudeInteraction($), { team, synced: sessionSyncs(binding) })
   } catch (error) {
@@ -5063,7 +5126,7 @@ async function runDeltaCommand($: Runtime, action: string, form: CommandForm): P
     if (!emails.length) {
       // The current organization is known once anything has listed them; otherwise link the dashboard itself.
       const members = currentOrganizationId ? membersUrl(currentOrganizationId) : DASHBOARD_URL
-      return { text: `Usage: /delta-org invite <email> [<email>…]. Invites people to your current Delta organization. To invite many people at once, use the dashboard: ${members}` }
+      return { text: `Usage: /delta-org invite <email> [<email>…]. Invites people to your current Delta team. To invite many people at once, use the dashboard: ${members}` }
     }
     return organizationCommand($, ['invite', '--', ...emails])
   }
@@ -5390,9 +5453,10 @@ export function register(on: On) {
     if (runtime.currentTurnId === undefined) {
       void settleRemote($, session)?.catch((error) => report($, error))
       scheduleMove($, session)
-      if (shareAfterTurn === session) {
+      if (shareAfterTurn?.session === session) {
+        const { audience } = shareAfterTurn
         shareAfterTurn = undefined
-        beginShare($, session)
+        beginShare($, session, audience)
       }
     }
     return result
@@ -5478,6 +5542,12 @@ export function register(on: On) {
 
   // The plugin's own command output row: a remote message, event, tool call or comment draws here, from this
   // plugin's own data rather than the row's stored text, which carries none of it.
+  // The plugin's own questions draw a hint beside each option, as the option's description.
+  on('ui.render', { component: 'AskUserQuestion' }, async ($, e, next) => {
+    const questions = withQuestionHints(e.props.questions)
+    return next(questions ? { ...e, props: { ...e.props, questions } } : e)
+  })
+
   on('ui.render', { component: 'CommandOutput' }, async ($, e, next) => {
     const id = shownItemId(e.props.args)
     if (e.props.command !== 'delta' || id === undefined) return next(e)
@@ -5553,7 +5623,7 @@ export function register(on: On) {
       sharing.cancelled = true
       sharing = undefined
     }
-    if (shareAfterTurn === e.sessionId) shareAfterTurn = undefined
+    if (shareAfterTurn?.session === e.sessionId) shareAfterTurn = undefined
     // The session's subagents end with it. Their saved state stays, so the next activation closes
     // a turn left open and delivers what they queued.
     for (const [agentId, child] of children) {
@@ -5628,14 +5698,14 @@ export function register(on: On) {
   })
 
   on('session.start', async ($, e, next) => {
-    await $.command.register({ name: 'delta', description: 'Share or join a Delta session, set up syncing, or choose an organization', argumentHint: 'share [<email>…] | join <shared-link-or-thread> | setup | org list | org current | org switch <ID>' })
+    await $.command.register({ name: 'delta', description: 'Share or join a Delta session, set up syncing, or choose a team', argumentHint: 'share [<email>…] | join <shared-link-or-thread> | setup | org list | org current | org switch <ID>' })
     // Plugin commands cannot declare subcommands, so each `/delta` action is also its own command and
     // appears in the slash-command menu.
     await $.command.register({ name: 'delta-share', description: 'Delta: sync this session and its code to DeltaDB, and choose who sees it', argumentHint: '[<email>…]' })
     // Claude's menu shows a command's description but not its argument hint, so the description carries the format.
     await $.command.register({ name: 'delta-join', description: 'Delta: join a shared conversation. Needs its link: /delta-join <link>', argumentHint: '<shared-link-or-thread>' })
     await $.command.register({ name: 'delta-setup', description: 'Delta: choose which sessions in this repository sync to DeltaDB' })
-    await $.command.register({ name: 'delta-org', description: 'Delta: manage your organization. /delta-org list, current, switch <ID>, or invite <email>', argumentHint: 'list | current | switch <ID> | invite <email>…' })
+    await $.command.register({ name: 'delta-org', description: 'Delta: manage your team. /delta-org list, current, switch <ID>, or invite <email>', argumentHint: 'list | current | switch <ID> | invite <email>…' })
     const result = await next(e)
     const session = await $.session.id()
     try { await activate($, session) }
@@ -5646,6 +5716,15 @@ export function register(on: On) {
     // the Delta commands the join runs here are `$` calls, which that budget never counts. The
     // claim reports its own failure.
     await stateFor(session).handoffClaim
+    // Claude reports a session's start (`classic.SessionStart`) just before this hook, but not to a
+    // plugin enabled in a running session, as right after `/plugin install`. Such a session is
+    // offered setup now rather than at the next startup or `/clear`. The check waits a tick, so a
+    // start report that arrives just after this hook still counts, and a session that ended meanwhile
+    // is offered nothing.
+    $.clock.after(0, () => {
+      if (active !== session || sessionSources.has(session) || joining) return
+      void startSession($, session, true).catch((error) => { void report($, error) })
+    })
     return result
   })
 
@@ -5699,7 +5778,7 @@ export function register(on: On) {
   on('command.run', { command: 'delta-setup' }, async ($, e) => runDeltaCommand($, `setup ${e.args.trim()}`.trim(), 'dedicated_command'))
   on('command.run', { command: 'delta-org' }, async ($, e) => e.args.trim()
     ? runDeltaCommand($, `org ${e.args.trim()}`, 'dedicated_command')
-    : { text: 'Usage: /delta-org list (your organizations), /delta-org current (the selected one), /delta-org switch <ID>, or /delta-org invite <email>… (invite people to the selected one).' })
+    : { text: 'Usage: /delta-org list (your teams), /delta-org current (the selected one), /delta-org switch <ID>, or /delta-org invite <email>… (invite people to the selected one).' })
 
   on('session.append', async ($, e, next) => {
     if (e.agentId !== undefined) {

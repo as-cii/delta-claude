@@ -11,10 +11,15 @@ function harness(options: {
   contractMax?: number
   organizations?: { id: string; name: string; current: boolean; personal?: boolean }[]
   login?: string
-  shared?: boolean
+  /** Who already sees this session; nobody unless set. */
+  audience?: 'none' | 'private' | 'shared'
   failWrite?: boolean
   failCreate?: boolean
   failInvite?: string
+  /** Whether `openLink` can open a browser; true unless set. */
+  canOpen?: boolean
+  /** The checkout's Git remotes; `origin` unless set. */
+  remotes?: string[]
   others?: Record<string, string>
 } = {}) {
   const answers = [...options.answers ?? []]
@@ -24,9 +29,11 @@ function harness(options: {
   const writes: { path: string; text: string }[] = []
   // Files other than the setting itself, such as the repository's Git exclude list, by path.
   const others = new Map<string, string>(Object.entries(options.others ?? {}))
-  let shares = 0
+  const shares: string[] = []
   const creates: string[] = []
   const invites: { organization: string; emails: string[] }[] = []
+  const opened: string[] = []
+  let signIns = 0
   const interaction: Interaction = {
     async ask(question, askOptions) {
       // Claude's `$.ui.ask` shows plain-text options only; anything else cannot be drawn.
@@ -47,8 +54,13 @@ function harness(options: {
       return root
     },
     gitCommonDir: async () => options.commonDir,
+    remotes: async () => options.remotes ?? ['origin'],
     contract: async () => ({ operation: 'contract', min: 1, max: options.contractMax ?? 6 }),
-    authenticate: async () => {},
+    authenticate: async () => { signIns++ },
+    openLink: async (url) => {
+      opened.push(url)
+      return options.canOpen ?? true
+    },
     organizations: async () => options.organizations ?? [{ id: 'org-1', name: 'Zed', current: true }],
     login: async () => options.login,
     createOrganization: async (name) => {
@@ -68,10 +80,10 @@ function harness(options: {
       writes.push({ path, text })
       file = text
     },
-    sessionShared: async () => options.shared ?? false,
-    shareSession: async () => { shares++; return true },
+    sessionAudience: async () => options.audience ?? 'none',
+    shareSession: async (audience) => { shares.push(audience); return true },
   }
-  return { env, interaction, asks, logs, writes, creates, invites, others, current: () => file, shares: () => shares }
+  return { env, interaction, asks, logs, writes, creates, invites, others, opened, current: () => file, shares: () => shares, signIns: () => signIns }
 }
 
 describe('setup wizard', () => {
@@ -112,30 +124,36 @@ describe('setup wizard', () => {
     expect(JSON.parse(replaced.current()!)).toEqual({ threads: { mode: 'manual', organization: 'org-1' } })
   })
 
-  test('after saving, only Organization sharing offers to sync this session, and only while it is unshared', async () => {
-    const synced = harness({ answers: ['Zed', 'Organization sharing', 'Sync it'] })
-    expect((await runSetupWizard(synced.env, synced.interaction)).status).toBe('wrote')
-    expect(synced.asks.at(-1)?.question).toContain('Sync this session to Zed')
-    expect(synced.shares()).toBe(1)
-
-    const declined = harness({ answers: ['Zed', 'Organization sharing'] })
-    expect((await runSetupWizard(declined.env, declined.interaction)).status).toBe('wrote')
-    expect(declined.shares()).toBe(0)
-
-    // A share would publish to the organization, which Private sync and Manual did not ask for.
-    for (const answers of [['Zed', 'Private sync'], ['Zed', 'Manual']]) {
-      const other = harness({ answers })
-      expect((await runSetupWizard(other.env, other.interaction)).status).toBe('wrote')
-      expect(other.asks.some((ask) => ask.question.includes('Sync this session'))).toBe(false)
+  test('after saving an automatic mode, setup offers to sync this session the way that mode would', async () => {
+    const cases = [
+      { mode: 'Team sharing', question: 'Sync this session to Zed too?', audience: 'organization' },
+      { mode: 'Private sync', question: 'Sync this session privately too?', audience: 'private' },
+    ]
+    for (const { mode, question, audience } of cases) {
+      const synced = harness({ answers: ['Zed', mode, 'Sync it'] })
+      expect(await runSetupWizard(synced.env, synced.interaction)).toMatchObject({ status: 'wrote', text: expect.stringContaining('Syncing this session now.') })
+      expect(synced.asks.at(-1)?.question).toContain(question)
+      expect(synced.shares()).toEqual([audience])
+      // Declining says why this session isn't syncing, so a quiet status line doesn't look broken.
+      const declined = harness({ answers: ['Zed', mode, 'Not now'] })
+      expect(await runSetupWizard(declined.env, declined.interaction)).toMatchObject({ status: 'wrote', text: expect.stringContaining("This session isn't syncing; run /delta-share") })
+      expect(declined.shares()).toEqual([])
     }
-    const already = harness({ answers: ['Zed', 'Organization sharing'], shared: true })
-    await runSetupWizard(already.env, already.interaction)
-    expect(already.asks.some((ask) => ask.question.includes('Sync this session'))).toBe(false)
+    // Manual shares by hand, so it only says how.
+    const manual = harness({ answers: ['Zed', 'Manual'] })
+    expect(await runSetupWizard(manual.env, manual.interaction)).toMatchObject({ text: expect.stringContaining("This session isn't syncing; run /delta-share") })
+    expect(manual.asks.some((ask) => ask.question.includes('Sync this session'))).toBe(false)
+    // A session that already syncs the way the mode would isn't asked; a private one may still go to the team.
+    for (const [mode, audience, asked] of [['Team sharing', 'shared', false], ['Private sync', 'private', false], ['Private sync', 'shared', false], ['Team sharing', 'private', true]] as const) {
+      const h = harness({ answers: ['Zed', mode, 'Not now'], audience })
+      await runSetupWizard(h.env, h.interaction)
+      expect(h.asks.some((ask) => ask.question.includes('Sync this session'))).toBe(asked)
+    }
   })
 
   test('an account with no team is asked to name one before choosing a mode', async () => {
     const cases: { answers: string[]; created: string[]; status: string; failCreate?: boolean }[] = [
-      { answers: ['Acme Team', 'Not now', 'Organization sharing'], created: ['Acme Team'], status: 'wrote' },
+      { answers: ['Acme Team', 'Invite later', 'Team sharing'], created: ['Acme Team'], status: 'wrote' },
       { answers: ['Cancel'], created: [], status: 'cancelled' },
       // A slash command typed while the dialog was open is not a name.
       { answers: ['/delta-share'], created: [], status: 'cancelled' },
@@ -151,37 +169,45 @@ describe('setup wizard', () => {
   })
 
   test('an account with only a personal organization is recommended a team, and may keep its sessions personal', async () => {
-    const keep = 'Skip: keep sessions personal; share one by email with /delta-share'
+    const keep = 'Skip this step (keep sessions to myself)'
     const options = (h: ReturnType<typeof harness>, index: number) => (h.asks[index]!.options as { options: string[] }).options
     // Without the CLI's flag, the personal organization is recognised by the name Delta gives it.
     const named = harness({ answers: [keep, 'Private sync'], login: 'ada',
       organizations: [{ id: 'org-ada', name: "ada's Organization", current: true }] })
     expect((await runSetupWizard(named.env, named.interaction)).status).toBe('wrote')
-    expect(options(named, 0)).toEqual(['Create a new organization', keep])
+    expect(options(named, 0)).toEqual(['Create a team', keep])
     expect(JSON.parse(named.current()!).threads).toEqual({ mode: 'private', organization: 'org-ada' })
-    // Nobody else is in a personal organization, so it offers no Organization sharing.
-    expect(options(named, 1).some((label) => label.startsWith('Organization sharing'))).toBe(false)
+    // Nobody else is in a personal organization, so it offers no Team sharing.
+    expect(options(named, 1).some((label) => label.startsWith('Team sharing'))).toBe(false)
     // The flag decides whatever the name, and a created team is offered every mode.
-    const flagged = harness({ answers: ['Acme', 'Not now', 'Organization sharing'],
+    const flagged = harness({ answers: ['Acme', 'Invite later', 'Team sharing'],
       organizations: [{ id: 'org-p', name: 'Renamed', current: true, personal: true }] })
     expect((await runSetupWizard(flagged.env, flagged.interaction)).status).toBe('wrote')
     expect(JSON.parse(flagged.current()!).threads).toEqual({ mode: 'organization', organization: 'org-Acme' })
     expect(options(flagged, 2)).toEqual(['Private sync (every new session, only you see it until you share)',
-      'Organization sharing (every new session, visible to Acme)', 'Manual (only sessions you share with /delta-share)'])
+      'Team sharing (every new session, visible to Acme)', 'Manual (only sessions you share with /delta-share)'])
   })
 
-  test('an account with several teams can still create a new one, or go back to the list', async () => {
+  test('an account with teams creates a new one by typing its name, once confirmed, or skips teams', async () => {
     const teams = [{ id: 'org-1', name: 'Zed', current: true }, { id: 'org-2', name: 'Guild', current: false }]
-    const created = harness({ organizations: teams, answers: ['Create a new organization', 'Acme', 'Not now', 'Organization sharing', 'Not now'] })
+    const created = harness({ organizations: teams, answers: ['Acme', 'Create it', 'Invite later', 'Team sharing', 'Not now'] })
     expect((await runSetupWizard(created.env, created.interaction)).status).toBe('wrote')
     expect(created.creates).toEqual(['Acme'])
+    expect(created.asks[1]!.question).toBe('Create a new team called \u201cAcme\u201d?')
     expect(JSON.parse(created.current()!).threads).toEqual({ mode: 'organization', organization: 'org-Acme' })
-    // Going back from the name asks which team again; Cancel ends setup.
-    const back = harness({ organizations: teams, answers: ['Create a new organization', 'Back to the list', 'Zed', 'Private sync'] })
+    // Going back from the confirmation asks which team again, and creates nothing.
+    const back = harness({ organizations: teams, answers: ['Acme', 'Back to the list', 'Zed', 'Private sync'] })
     expect((await runSetupWizard(back.env, back.interaction)).status).toBe('wrote')
     expect(back.creates).toEqual([])
     expect(JSON.parse(back.current()!).threads.organization).toBe('org-1')
-    const cancelled = harness({ organizations: teams, answers: ['Create a new organization', 'Cancel'] })
+    // The question offers the teams, then keeping sessions personal, with no separate create option.
+    const personal = { id: 'org-ada', name: "ada's Organization", current: false }
+    const skipped = harness({ organizations: [...teams, personal], login: 'ada', answers: ['Skip this step (keep sessions to myself)', 'Private sync'] })
+    expect((await runSetupWizard(skipped.env, skipped.interaction)).status).toBe('wrote')
+    expect((skipped.asks[0]!.options as { options: string[] }).options).toEqual(['Zed', 'Guild', 'Skip this step (keep sessions to myself)'])
+    expect(JSON.parse(skipped.current()!).threads.organization).toBe('org-ada')
+    // Without a personal organization to keep sessions in, the alternative is Cancel, which ends setup.
+    const cancelled = harness({ organizations: teams, answers: ['Cancel'] })
     expect((await runSetupWizard(cancelled.env, cancelled.interaction)).status).toBe('cancelled')
   })
 
@@ -191,9 +217,16 @@ describe('setup wizard', () => {
     expect((await runSetupWizard(invited.env, invited.interaction)).status).toBe('wrote')
     expect(invited.invites).toEqual([{ organization: 'org-Acme', emails: ['ada@example.com', 'bo@example.com'] }])
     expect(invited.logs.join('\n')).toContain("Couldn't invite bo@example.com (already a member)")
-    // Bulk invitations live on the dashboard's members page, linked from the question and the result.
-    expect(invited.asks.find((ask) => ask.question.startsWith('Invite teammates'))?.question).toContain('https://dashboard.zed.dev/org-Acme/members')
+    // Bulk invitations live on the dashboard's members page, which the result links.
     expect(invited.logs.join('\n')).toContain('Manage members: https://dashboard.zed.dev/org-Acme/members')
+    // Managing the team opens that page, or links it where no browser can be opened, and setup continues.
+    for (const canOpen of [true, false]) {
+      const managed = harness({ answers: ['Acme', 'Manage team in browser', 'Private sync'], organizations: [], canOpen })
+      expect((await runSetupWizard(managed.env, managed.interaction)).status).toBe('wrote')
+      expect(managed.opened).toEqual(['https://dashboard.zed.dev/org-Acme/members'])
+      expect(managed.logs.join('\n')).toContain('https://dashboard.zed.dev/org-Acme/members')
+      expect(managed.invites).toEqual([])
+    }
     // Text with no address invites nobody and says how to invite later.
     const none = harness({ answers: ['Acme', 'later please', 'Private sync'], organizations: [] })
     expect((await runSetupWizard(none.env, none.interaction)).status).toBe('wrote')
@@ -201,7 +234,7 @@ describe('setup wizard', () => {
     // An existing organization is never offered invitations.
     const existing = harness({ answers: ['Zed', 'Private sync'] })
     await runSetupWizard(existing.env, existing.interaction)
-    expect(existing.asks.some((ask) => ask.question.startsWith('Invite teammates'))).toBe(false)
+    expect(existing.asks.some((ask) => ask.question.startsWith('Who should join'))).toBe(false)
   })
 
   test('invitation results decode from the CLI wire format', () => {
@@ -215,11 +248,41 @@ describe('setup wizard', () => {
   })
 
   test('a Delta this plugin cannot record against stops setup before any question', async () => {
-    const h = harness({ answers: ['Organization sharing'], contractMax: 3 })
+    const h = harness({ answers: ['Team sharing'], contractMax: 3 })
     const outcome = await runSetupWizard(h.env, h.interaction)
     expect(outcome).toMatchObject({ status: 'failed', text: expect.stringContaining('Update Delta') })
     expect(h.asks).toEqual([])
     expect(h.writes).toEqual([])
+    // A Delta too old to record against is not asked to sign in.
+    expect(h.signIns()).toBe(0)
+  })
+
+  test('a repository Delta cannot identify by its remote stops setup before any question, saying why', async () => {
+    const cases = [
+      { remotes: [], text: 'This repository has no Git remote, and Delta needs one to sync it. Add a remote and push to it, then run /delta-setup again.' },
+      { remotes: ['fork', 'upstream'], text: "Delta can't sync this repository because it has several Git remotes (fork, upstream) and none is named origin, so Delta can't tell which one is the repository. Rename the one you push to: git remote rename <name> origin. Then run /delta-setup again." },
+    ]
+    for (const { remotes, text } of cases) {
+      const h = harness({ answers: ['Zed', 'Manual'], remotes })
+      expect(await runSetupWizard(h.env, h.interaction)).toEqual({ status: 'failed', text })
+      expect(h.asks).toEqual([])
+      expect(h.signIns()).toBe(0)
+    }
+    // Several remotes are fine when one is origin, as Delta then uses it.
+    const named = harness({ answers: ['Zed', 'Manual'], remotes: ['upstream', 'origin'] })
+    expect((await runSetupWizard(named.env, named.interaction)).status).toBe('wrote')
+  })
+
+  test('the mode question names the current team, never its id', async () => {
+    const modeQuestion = (h: ReturnType<typeof harness>) => h.asks.find((ask) => ask.question.includes('Which sessions should Delta sync?'))!.question
+    const team = harness({ answers: ['Zed', 'Manual'], file: JSON.stringify({ threads: { mode: 'private', organization: 'org-1' } }) })
+    await runSetupWizard(team.env, team.interaction)
+    expect(modeQuestion(team)).toContain('Currently: Private sync with Zed.')
+    const personal = harness({ answers: ['Skip this step (keep sessions to myself)', 'Manual'], login: 'ada',
+      organizations: [{ id: 'org-ada', name: "ada's Organization", current: true }],
+      file: JSON.stringify({ threads: { mode: 'private', organization: 'org-ada' } }) })
+    await runSetupWizard(personal.env, personal.interaction)
+    expect(modeQuestion(personal)).toContain("Currently: Private sync with ada's Organization.")
   })
 
   test('a policy naming an organization the account is not in is called out before the first question', async () => {
@@ -236,17 +299,17 @@ describe('setup wizard', () => {
     const six = Array.from({ length: 6 }, (_, index) => ({ id: `org-${index}`, name: `Organization ${index}`, current: index === 0 }))
     const twins = [{ id: 'org-1', name: 'Zed', current: true }, { id: 'org-2', name: 'Zed', current: false }]
     const cases: { answers: string[]; organizations?: typeof six; chosen: string; offered?: string[] }[] = [
-      // Even a single team is offered beside a new one.
-      { answers: ['Zed', 'Private sync'], chosen: 'org-1', offered: ['Zed', 'Create a new organization'] },
-      // At most three are offered, then a new one; the rest are reached by typing a name or an id.
+      // Even a single team is offered beside a second answer.
+      { answers: ['Zed', 'Private sync'], chosen: 'org-1', offered: ['Zed', 'Cancel'] },
+      // At most three are offered; the rest are reached by typing a name or an id.
       { answers: ['Organization 5', 'Private sync'], organizations: six, chosen: 'org-5',
-        offered: ['Organization 0', 'Organization 1', 'Organization 2', 'Create a new organization'] },
+        offered: ['Organization 0', 'Organization 1', 'Organization 2', 'Cancel'] },
       { answers: ['org-3', 'Private sync'], organizations: six, chosen: 'org-3' },
-      // An unknown answer asks again instead of guessing.
-      { answers: ['nobody', 'Organization 2', 'Private sync'], organizations: six, chosen: 'org-2' },
+      // A name several organizations share asks again instead of guessing or creating another.
+      { answers: ['Zed', 'Zed (org-2)', 'Private sync'], organizations: twins, chosen: 'org-2' },
       // Organizations sharing a name are offered with their ids, so choosing one never loops.
       { answers: ['Zed (org-2)', 'Private sync'], organizations: twins, chosen: 'org-2',
-        offered: ['Zed (org-1)', 'Zed (org-2)', 'Create a new organization'] },
+        offered: ['Zed (org-1)', 'Zed (org-2)', 'Cancel'] },
     ]
     for (const { answers, organizations, chosen, offered } of cases) {
       const h = harness({ answers, organizations })
@@ -273,15 +336,15 @@ describe('onboarding', () => {
     const first = harness({ answers: ['Not now'], commonDir: '/repo/.git' })
     expect(await offerOnboarding(first.env, first.interaction, backend, newSession())).toBe('offered')
     // A second session in a linked worktree shares the common directory and is not offered again.
-    const second = harness({ answers: ['Set it up', 'Zed', 'Manual'], commonDir: '/repo/.git' })
+    const second = harness({ answers: ['Set up now', 'Zed', 'Manual'], commonDir: '/repo/.git' })
     expect(await offerOnboarding(second.env, second.interaction, backend, newSession())).toBe('skipped')
     expect(second.asks).toEqual([])
   })
 
   test('never offers in a configured, joined, joining, or resumed repository', async () => {
     const { backend } = memoryStore()
-    for (const flags of [{ configured: true }, { newSession: false }, { joined: true }, { joining: true }]) {
-      const h = harness({ answers: ['Set it up'] })
+    for (const flags of [{ configured: true }, { newToPlugin: false }, { joined: true }, { joining: true }]) {
+      const h = harness({ answers: ['Set up now'] })
       expect(await offerOnboarding(h.env, h.interaction, backend, newSession(flags))).toBe('skipped')
       expect(h.asks).toEqual([])
     }
@@ -290,9 +353,9 @@ describe('onboarding', () => {
   test('only a decision consumes the offer; a setup left unfinished is offered again from the start', async () => {
     const unfinished: (string | undefined)[][] = [
       // A typed answer, like a command entered while the dialog was open, is not a decision.
-      ['__unavailable__'], [undefined], ['/delta-share'], ['Set it up', undefined],
+      ['__unavailable__'], [undefined], ['/delta-share'], ['Set up now', undefined],
       // A setup that fails partway: the policy write is refused.
-      ['Set it up', 'Zed', 'Manual', '__write_fails__'],
+      ['Set up now', 'Zed', 'Manual', '__write_fails__'],
     ]
     for (const answers of unfinished) {
       const { store, backend } = memoryStore()
@@ -303,7 +366,7 @@ describe('onboarding', () => {
       expect(await offerOnboarding(again.env, again.interaction, backend, newSession())).toBe('offered')
       expect(again.asks).toHaveLength(1)
     }
-    for (const answers of [['Not now'], ['Set it up', 'Zed', 'Manual']]) {
+    for (const answers of [['Not now'], ['Set up now', 'Zed', 'Manual']]) {
       const { store, backend } = memoryStore()
       const h = harness({ answers })
       await offerOnboarding(h.env, h.interaction, backend, newSession())
@@ -326,7 +389,7 @@ describe('onboarding', () => {
     }
     const offering = offerOnboarding(first.env, first.interaction, backend, newSession())
     await dialogOpen
-    const second = harness({ answers: ['Set it up'] })
+    const second = harness({ answers: ['Set up now'] })
     expect(await offerOnboarding(second.env, second.interaction, backend, newSession())).toBe('skipped')
     release()
     expect(await offering).toBe('offered')
@@ -334,7 +397,7 @@ describe('onboarding', () => {
 
   test('a setup started from the offer reports its outcome', async () => {
     const { backend } = memoryStore()
-    const h = harness({ answers: ['Set it up', 'Zed', 'Private sync'] })
+    const h = harness({ answers: ['Set up now', 'Zed', 'Private sync'] })
     await offerOnboarding(h.env, h.interaction, backend, newSession())
     expect(h.logs.at(-1)).toContain('Saved Private sync with Zed to .delta/settings.json')
   })
@@ -342,7 +405,7 @@ describe('onboarding', () => {
 
 /** Onboarding flags for a new, unconfigured session in `/repo`, with `overrides` applied. */
 function newSession(overrides: Partial<Parameters<typeof offerOnboarding>[3]> = {}) {
-  return { root: '/repo', configured: false, newSession: true, joined: false, joining: false, ...overrides }
+  return { root: '/repo', configured: false, newToPlugin: true, joined: false, joining: false, ...overrides }
 }
 
 function memoryStore() {

@@ -5,21 +5,23 @@
 //! `register.tsx` supplies the real Claude Code bindings.
 
 import { policyPath, readProjectPolicy, recordsAutomatically, serializeProjectPolicy, type PolicyFile, type ThreadMode } from './project-policy'
-import { commandErrorFromEnvelope, contractRefusal, type ThreadContract } from './thread-commands'
 import { AccessRequiredError } from './auth'
+import { commandErrorFromEnvelope, contractRefusal, type ThreadContract } from './thread-commands'
 
 /** A question could not be shown: this Claude has no interactive question API. */
 export class InteractionUnavailable extends Error {}
 /** The person dismissed the question. */
 export class InteractionDismissed extends Error {}
 
-/**
- * One answer a question offers. `$.ui.ask` takes plain-text options only and shows no per-option
- * description, so anything a person needs to choose goes in the question itself.
- */
+/** One answer a question offers: a plain-text label, which is also what the question answers. */
 export type AskOption = string
+/**
+ * A question's answers. `descriptions` maps a label to the short hint Claude Code's dialog draws
+ * beside that option; the label alone is still the answer.
+ */
 export type AskOptions = readonly AskOption[] | {
   options: readonly AskOption[]; header?: string; multiSelect?: boolean
+  descriptions?: Readonly<Record<AskOption, string>>
 }
 
 /** The interactive surface the wizard and onboarding speak through. */
@@ -51,10 +53,14 @@ export type SetupEnv = {
   checkoutRoot(): Promise<string>
   /** The absolute Git common directory, shared by linked worktrees. */
   gitCommonDir(): Promise<string | undefined>
+  /** The checkout's Git remote names, or undefined when Git cannot list them. */
+  remotes(): Promise<string[] | undefined>
   /** Find or install the CLI and read its contract; undefined when it predates `thread contract`. */
   contract(): Promise<ThreadContract | undefined>
   /** Sign in before account operations, only after the person chooses to set up syncing. */
   authenticate(notice: (text: string) => Promise<void>): Promise<void>
+  /** Open a web page in the person's browser; false when this platform cannot. */
+  openLink(url: string): Promise<boolean>
   /** Organizations for `thread create`, or a typed rejection when the CLI cannot list them. */
   organizations(): Promise<Organization[]>
   /** The signed-in account's GitHub login, or undefined when it cannot be read. */
@@ -70,10 +76,16 @@ export type SetupEnv = {
   readFile(path: string): Promise<string | undefined>
   /** Write a policy file; the wizard does not commit it. */
   writeFile(path: string, text: string): Promise<void>
-  /** Whether this session's conversation is already shared with the organization. */
-  sessionShared(): Promise<boolean>
-  /** Start sharing this session with the organization, as `/delta share` does; false when it cannot start now. */
-  shareSession(): Promise<boolean>
+  /**
+   * Who already sees this session: nobody (`none`, it doesn't sync), only its owner (`private`), or
+   * people beyond its owner (`shared`, including a joined thread).
+   */
+  sessionAudience(): Promise<'none' | 'private' | 'shared'>
+  /**
+   * Start syncing this session privately or with the organization, as `/delta share` does; false when
+   * it cannot start now.
+   */
+  shareSession(audience: 'private' | 'organization'): Promise<boolean>
 }
 
 /** Validate the parsed body of `delta --json org list`, keeping the CLI's typed error envelope. */
@@ -125,6 +137,26 @@ export function invitationSummary(results: readonly InviteResult[], target: stri
   ].filter(Boolean).join(' ')
 }
 
+/**
+ * Why Delta can't sync a checkout with these Git remotes, ending without a period, or undefined when
+ * it can. Delta identifies a repository by its remote, so it refuses a checkout with none, or with
+ * several and none named `origin`. Unknown remotes (Git couldn't list them) are left to Delta.
+ */
+export function remoteRefusal(remotes: readonly string[] | undefined, command: string): string | undefined {
+  if (!remotes) return
+  if (!remotes.length)
+    return `This repository has no Git remote, and Delta needs one to sync it. Add a remote and push to it, then run ${command} again`
+  if (remotes.length > 1 && !remotes.includes('origin'))
+    return `Delta can't sync this repository because it has several Git remotes (${remotes.join(', ')}) and none is named origin, ` +
+      `so Delta can't tell which one is the repository. Rename the one you push to: git remote rename <name> origin. Then run ${command} again`
+}
+
+/**
+ * How questions name Claude Code's free-text row. The dialog always draws it last, under this label,
+ * and a plugin can neither move nor rename it, so a question that expects typing points at it.
+ */
+export const TYPE_SOMETHING = '“Type something”'
+
 /** Delta's web dashboard, where an organization's members are managed in bulk. */
 export const DASHBOARD_URL = 'https://dashboard.zed.dev'
 
@@ -144,7 +176,7 @@ export type SetupOutcome = {
   text: string
 }
 
-const MODE_NAMES: Record<ThreadMode, string> = { manual: 'Manual', private: 'Private sync', organization: 'Organization sharing' }
+const MODE_NAMES: Record<ThreadMode, string> = { manual: 'Manual', private: 'Private sync', organization: 'Team sharing' }
 /**
  * Each mode's answer in the setup question, recommended one first. `$.ui.ask` shows no per-option
  * description, so the label carries its own short explanation. A personal organization has nobody
@@ -153,16 +185,18 @@ const MODE_NAMES: Record<ThreadMode, string> = { manual: 'Manual', private: 'Pri
 function modeLabels(organization: Organization | undefined, personal: boolean): [ThreadMode, string][] {
   return [
     ['private', 'Private sync (every new session, only you see it until you share)'],
-    ...personal ? [] : [['organization', `Organization sharing (every new session, visible to ${organization?.name ?? 'your organization'})`] as [ThreadMode, string]],
+    ...personal ? [] : [['organization', `Team sharing (every new session, visible to ${organization?.name ?? 'your team'})`] as [ThreadMode, string]],
     ['manual', 'Manual (only sessions you share with /delta-share)'],
   ]
 }
-/** The organization picker's last option, offered alongside every existing team. */
-const CREATE_ORGANIZATION = 'Create a new organization'
-/** The team question's alternative for an account with only a personal organization. */
-const KEEP_PERSONAL = 'Skip: keep sessions personal; share one by email with /delta-share'
+/** The team question's first option for an account with no team yet. */
+const CREATE_ORGANIZATION = 'Create a team'
+/** The team question's last option, keeping sessions in the account's personal organization. */
+const KEEP_PERSONAL = 'Skip this step (keep sessions to myself)'
 /** The tag above each setup question; Claude Code allows at most 12 characters. */
-const HEADER = 'Delta sync'
+const HEADER = 'Delta setup'
+/** The new team's name question, which is answered in Claude Code's free-text row. */
+const TEAM_NAME_QUESTION = `Create a team: select ${TYPE_SOMETHING} and enter its name.`
 /** The setting's file, relative to the checkout root, as people see it named. */
 const SETTINGS_FILE = '.delta/settings.json'
 /** The setting's line in the repository-local `info/exclude`, anchored to the checkout root as the app's are. */
@@ -220,10 +254,12 @@ function matchOrganization(answer: string, organizations: readonly Organization[
 }
 
 /** Describe a repository's current policy for the wizard's first question. */
-function currentPolicy(policy: PolicyFile['policy']): string {
+function currentPolicy(policy: PolicyFile['policy'], organizations: readonly Organization[]): string {
   if (!policy.configured) return 'Delta isn\'t set up for this repository yet.'
   if (policy.mode === 'manual') return 'Currently: Manual (only sessions you share with /delta-share).'
-  return `Currently: ${MODE_NAMES[policy.mode]}${policy.organization ? ` (${policy.organization})` : ''}.`
+  // A person knows an organization by its name; the id is shown only for one this account can't see.
+  const where = organizations.find((org) => org.id === policy.organization)?.name ?? policy.organization
+  return `Currently: ${MODE_NAMES[policy.mode]}${where ? ` with ${where}` : ''}.`
 }
 
 /**
@@ -243,6 +279,9 @@ async function askAndWrite(env: SetupEnv, interaction: Interaction): Promise<Set
   let root: string
   try { root = await env.checkoutRoot() }
   catch (error) { return { status: 'no-checkout', text: `/delta-setup needs a Git checkout: ${String(error)}` } }
+  // Nothing below can work in a repository Delta can't identify, so that is said before any question.
+  const unidentified = remoteRefusal(await env.remotes(), '/delta-setup')
+  if (unidentified) return { status: 'failed', text: `${unidentified}.` }
   const path = policyPath(root)
   let file: PolicyFile
   try { file = readProjectPolicy(await env.readFile(path)) }
@@ -259,7 +298,6 @@ async function askAndWrite(env: SetupEnv, interaction: Interaction): Promise<Set
   catch (error) { return { status: 'failed', text: `/delta-setup could not prepare Delta: ${String(error)}` } }
   const refusal = contractRefusal(contract)
   if (refusal) return { status: 'failed', text: `/delta-setup: ${refusal}, then run /delta-setup again.` }
-
   try { await env.authenticate((text) => interaction.log(text, 'transcript')) }
   catch (error) {
     return { status: 'failed', text: error instanceof AccessRequiredError ? error.message : `/delta-setup could not sign in to Delta: ${String(error)}` }
@@ -267,45 +305,53 @@ async function askAndWrite(env: SetupEnv, interaction: Interaction): Promise<Set
 
   let organizations: Organization[]
   try { organizations = await env.organizations() }
-  catch (error) { return { status: 'failed', text: `/delta-setup could not list your Delta organizations: ${String(error)}` } }
+  catch (error) { return { status: 'failed', text: `/delta-setup could not list your Delta teams: ${String(error)}` } }
   // A policy that records to an organization this account isn't in records nothing for it; say so
   // before asking, so the person can see why.
   if (recordsAutomatically(file.policy) && file.policy.organization && organizations.length &&
       !organizations.some((org) => org.id === file.policy.organization))
-    await interaction.log(`This repository syncs to ${file.policy.organization}, which your Delta account isn't a member of, so its sessions don't sync for you. Choose an organization you're in, or cancel to leave it unchanged.`, 'transcript')
+    await interaction.log(`This repository syncs to ${file.policy.organization}, which your Delta account isn't a member of, so its sessions don't sync for you. Choose a team you're in, or cancel to leave it unchanged.`, 'transcript')
 
   // The team comes first, so sessions land in an organization they can later be shared from: a
   // thread's organization never changes once it syncs, and a personal one has nobody to share with.
   const login = await env.login().catch(() => undefined)
   const teams = organizations.filter((org) => !isPersonalOrganization(org, login))
   const personalOrganization = organizations.find((org) => isPersonalOrganization(org, login))
-  // The list always offers the current team and up to two others, then a new one; an account with no
-  // team may instead keep its personal organization. Any organization is still reachable by typing its
-  // exact name or id, an unmatched or ambiguous answer asks again, and going back from a new team's
-  // name returns here.
+  // An account with teams is offered the current one and up to two others; one with none is offered
+  // to create one. Either may instead keep its sessions in its personal organization. A typed answer
+  // names a team: an existing one by its exact name or id (an ambiguous name asks again), or else a new
+  // one, created once confirmed. Going back from a new team returns here.
   const current = teams.find((org) => org.current) ?? teams[0]
   const offered = current ? [current, ...teams.filter((org) => org !== current)].slice(0, MAX_ORGANIZATION_OPTIONS) : []
-  const alternative = teams.length ? [] : [personalOrganization ? KEEP_PERSONAL : 'Cancel']
+  const alternative = personalOrganization ? KEEP_PERSONAL : 'Cancel'
   const question = teams.length
-    ? 'Which team should this checkout sync to? Choose one, create a new one, or type an exact organization name or id.'
-    : 'Delta syncs your sessions into a team, so you can share them later; only you see them until you do. Type a name to create your team.'
+    ? 'Which team should sessions from this repository sync to? Only you see a session until you share it. ' +
+      `To create a new team, select ${TYPE_SOMETHING} and enter its name; creating a team makes sharing easier.`
+    : 'Create a team to more easily share sessions with others. Only you see a session until you share it, ' +
+      'or skip this step to keep sessions to yourself.'
+  const options = teams.length
+    ? [...offered.map((org) => organizationLabel(org, organizations)), alternative]
+    : [CREATE_ORGANIZATION, alternative]
   let chosen: Organization | SetupOutcome | 'declined' | undefined
   while (!chosen || chosen === 'declined') {
-    const answer = await interaction.ask(question,
-      { options: [...offered.map((org) => organizationLabel(org, organizations)), CREATE_ORGANIZATION, ...alternative], header: 'Team' })
+    // Only what the labels can't say gets a hint: which team Delta has selected.
+    const answer = await interaction.ask(question, {
+      options, header: 'Team',
+      ...current?.current ? { descriptions: { [organizationLabel(current, organizations)]: 'Current team' } } : {},
+    })
     if (answer === 'Cancel') return CANCELLED
     chosen = answer === KEEP_PERSONAL ? personalOrganization
-      : answer === CREATE_ORGANIZATION ? await offerNewOrganization(env, interaction, 'Type a name for the new team.', 'Back to the list')
+      : answer === CREATE_ORGANIZATION ? await offerNewOrganization(env, interaction, TEAM_NAME_QUESTION, 'Back to the list')
       // With no team to choose, a typed answer is the new team's name.
       : !teams.length ? await createTeam(env, interaction, answer)
-      : matchOrganization(answer, organizations)
+      : matchOrganization(answer, organizations) ?? await confirmNewTeam(env, interaction, answer, organizations)
   }
   if ('status' in chosen) return chosen
   const team = chosen
 
   const labels = modeLabels(team, isPersonalOrganization(team, login))
   const answer = await interaction.ask(
-    `${currentPolicy(file.policy)} When Delta syncs a Claude Code session, it stores the conversation and ` +
+    `${currentPolicy(file.policy, organizations)} When Delta syncs a Claude Code session, it stores the conversation and ` +
     'a copy of this checkout\'s code, including uncommitted changes, in DeltaDB. This applies to new ' +
     'sessions, not this one. Which sessions should Delta sync?',
     { options: labels.map(([, label]) => label), header: HEADER })
@@ -326,20 +372,25 @@ async function askAndWrite(env: SetupEnv, interaction: Interaction): Promise<Set
     await interaction.log(`Delta couldn't keep ${SETTINGS_FILE} out of Git; add it to .gitignore if you don't want to commit it.`, 'transcript')
   const summary = `${MODE_NAMES[mode]} with ${organizationName}`
   const saved = `Saved ${summary} to ${SETTINGS_FILE}. New sessions follow it from now on; run /delta-setup to change it.`
-  // The setting never applies to the session that saved it. Only Organization sharing offers to sync
-  // this one now: sharing it is what that choice asked for, while a share would contradict Private sync
-  // (it publishes to the organization) and Manual (sessions are shared by hand).
-  if (mode !== 'organization' || await env.sessionShared()) return { status: 'wrote', text: saved }
+  // The setting never applies to the session that saved it, so an automatic mode offers to sync this
+  // one the way it chose, privately or with the team, unless it already syncs that way. Manual syncs
+  // sessions by hand, so it only says how.
+  const notSyncing = `${saved} This session isn't syncing; run /delta-share to sync and share it.`
+  const audience = await env.sessionAudience()
+  if (mode === 'manual') return { status: 'wrote', text: audience === 'none' ? notSyncing : saved }
+  if (audience === 'shared' || (mode === 'private' && audience === 'private')) return { status: 'wrote', text: saved }
   let share: string | undefined
   try {
-    share = await interaction.ask(`Your new setting starts with your next session. Sync this session to ${organizationName} too?`,
-      { options: ['Sync it', 'Not now'], header: HEADER })
+    share = await interaction.ask(mode === 'private'
+      ? 'Your new setting starts with your next session. Sync this session privately too?'
+      : `Your new setting starts with your next session. Sync this session to ${organizationName} too?`,
+    { options: ['Sync it', 'Not now'], header: HEADER })
   }
   catch (error) { if (!(error instanceof InteractionDismissed || error instanceof InteractionUnavailable)) throw error }
-  if (share !== 'Sync it') return { status: 'wrote', text: `${saved} This session isn't syncing; use /delta-share to share it.` }
+  if (share !== 'Sync it') return { status: 'wrote', text: notSyncing }
   return {
     status: 'wrote',
-    text: await env.shareSession()
+    text: await env.shareSession(mode === 'private' ? 'private' : 'organization')
       ? `${saved} Syncing this session now.`
       : `${saved} This session couldn't start syncing now; use /delta-share once Claude is idle.`,
   }
@@ -358,6 +409,20 @@ async function offerNewOrganization(env: SetupEnv, interaction: Interaction, que
 }
 
 /**
+ * Offer to create a team under a typed name that matches no organization, so a mistyped name of an
+ * existing team doesn't silently create another. Undefined for a name several organizations share,
+ * or an answer that is not a name, so the team question asks again.
+ */
+async function confirmNewTeam(env: SetupEnv, interaction: Interaction, answer: string, organizations: readonly Organization[]): Promise<Organization | SetupOutcome | 'declined' | undefined> {
+  const name = answer.trim()
+  if (!name || name.startsWith('/') || organizations.some((org) => org.name.toLowerCase() === name.toLowerCase())) return undefined
+  const create = 'Create it'
+  if (await interaction.ask(`Create a new team called “${name}”?`, { options: [create, 'Back to the list'], header: HEADER }) !== create)
+    return 'declined'
+  return createTeam(env, interaction, name)
+}
+
+/**
  * Create a team under a typed name and offer invitations. Undefined for an answer that is not a name;
  * a failed creation is the setup's outcome.
  */
@@ -367,8 +432,8 @@ async function createTeam(env: SetupEnv, interaction: Interaction, answer: strin
   if (!name || name.startsWith('/')) return undefined
   let created: Organization
   try { created = await env.createOrganization(name) }
-  catch (error) { return { status: 'failed', text: `/delta-setup couldn't create the organization "${name}": ${String(error)}. Check /delta-org list before trying again; it may have been created.` } }
-  await interaction.log(`Created the Delta organization "${created.name}".`, 'transcript')
+  catch (error) { return { status: 'failed', text: `/delta-setup couldn't create the team "${name}": ${String(error)}. Check /delta-org list before trying again; it may have been created.` } }
+  await interaction.log(`Created the team "${created.name}".`, 'transcript')
   await offerInvites(env, interaction, created)
   return created
 }
@@ -379,17 +444,30 @@ async function createTeam(env: SetupEnv, interaction: Interaction, answer: strin
  * /delta-org invite.
  */
 async function offerInvites(env: SetupEnv, interaction: Interaction, organization: Organization) {
-  const later = 'Invite later with /delta-org invite'
+  const later = 'Invite later'
+  const manage = 'Manage team in browser'
+  const members = membersUrl(organization.id)
   let answer: string
   try {
-    answer = await interaction.ask(`Invite teammates to ${organization.name}? Type their email addresses, separated by commas. ` +
-      `To invite many people or manage members, use the dashboard: ${membersUrl(organization.id)}`,
-      { options: ['Not now', later], header: HEADER })
+    answer = await interaction.ask(`Who should join ${organization.name}? Select ${TYPE_SOMETHING} and enter their email addresses, separated by commas.`,
+      {
+        options: [later, manage], header: HEADER,
+        descriptions: { [later]: 'Invite anytime with /delta-org invite' },
+      })
   } catch (error) {
     if (error instanceof InteractionDismissed) return
     throw error
   }
-  if (answer === 'Not now' || answer === later) return
+  if (answer === later) {
+    await interaction.log(`Invite teammates to ${organization.name} anytime with /delta-org invite <email>.`, 'transcript')
+    return
+  }
+  if (answer === manage) {
+    await interaction.log(await env.openLink(members)
+      ? `Opened ${organization.name}'s members page in your browser: ${members}`
+      : `Manage ${organization.name}'s members here: ${members}`, 'transcript')
+    return
+  }
   const emails = emailsIn(answer)
   if (!emails.length) {
     await interaction.log('No email addresses found, so nobody was invited. Use /delta-org invite <email> to invite teammates later.', 'transcript')
@@ -412,8 +490,12 @@ export type OnboardingFlags = {
   root: string
   /** The checkout's policy file deliberately configures a mode, which suppresses the offer. */
   configured: boolean
-  /** A new session, not a resume, compaction, or fork. */
-  newSession: boolean
+  /**
+   * The plugin is seeing the session's beginning: a new session (startup or `/clear`), or a running
+   * one the plugin was just loaded into, as right after it is installed. Not a resume, compaction,
+   * or fork.
+   */
+  newToPlugin: boolean
   joined: boolean
   joining: boolean
 }
@@ -438,7 +520,7 @@ export async function offerOnboarding(
   env: SetupEnv, interaction: Interaction, store: OnboardingStore, flags: OnboardingFlags,
   claimed: (key: string) => void = () => {},
 ): Promise<OnboardingOutcome> {
-  if (flags.configured || flags.joined || flags.joining || !flags.newSession) return 'skipped'
+  if (flags.configured || flags.joined || flags.joining || !flags.newToPlugin) return 'skipped'
   const key = `setup-offered:${await env.gitCommonDir() ?? flags.root}`
   if (await store.get(key)) return 'skipped'
   await store.set(key, true)
@@ -458,19 +540,32 @@ export async function releaseOnboarding(store: OnboardingStore, key: string): Pr
   await store.set(key, false)
 }
 
+/** The onboarding question, which also names the command that reopens setup later. */
+export const ONBOARDING_QUESTION =
+  'The Delta plugin is installed, but nothing in this repository syncs until you set it up. ' +
+  'You\'ll configure your team and which sessions to sync. Set it up now?'
+/** What declining the onboarding offer leaves in the transcript, since the offer does not return. */
+export const ONBOARDING_DECLINED =
+  'Delta isn\'t set up here, so nothing syncs. Run /delta-setup to set it up, or /delta-share to sync and share just this session.'
+/** The onboarding offer's answer that opens setup. */
+const SET_UP_NOW = 'Set up now'
+
 /** Ask the onboarding question and run the setup it opens; `settled` when the person decided. */
 async function askOnboarding(env: SetupEnv, interaction: Interaction): Promise<'settled' | 'unfinished' | 'unavailable'> {
   let answer: string | undefined
   try {
-    answer = await interaction.ask('Set up Delta syncing for this repository?', { options: ['Set it up', 'Not now'], header: HEADER })
+    answer = await interaction.ask(ONBOARDING_QUESTION, { options: [SET_UP_NOW, 'Not now'], header: HEADER })
   }
   catch (error) {
     return error instanceof InteractionUnavailable ? 'unavailable' : 'unfinished'
   }
   // Only "Not now" declines. Anything typed instead, such as a slash command entered while the dialog
   // was open, decides nothing, so the offer comes back.
-  if (answer === 'Not now') return 'settled'
-  if (answer !== 'Set it up') return 'unfinished'
+  if (answer === 'Not now') {
+    await interaction.log(ONBOARDING_DECLINED, 'transcript')
+    return 'settled'
+  }
+  if (answer !== SET_UP_NOW) return 'unfinished'
   let text: string
   let wrote = false
   try {

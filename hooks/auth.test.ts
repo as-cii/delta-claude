@@ -389,12 +389,15 @@ test('setup installs Delta and finishes browser sign-in before creating a team a
   fake.holdAuth = new Promise<void>((resolve) => { finish = resolve })
   fake.answerQuestion = (question: any) => {
     const text = question.questions[0].question
-    const answer = text.startsWith('Delta syncs your sessions into a team') ? 'Acme'
+    const answer = text.startsWith('Create a team to more easily share') ? 'Acme'
       : text.startsWith('Delta needs you to sign in') ? 'Sign in'
-      : text.startsWith('Invite teammates') ? 'Not now' : 'Private sync'
+      : text.startsWith('Who should join') ? 'Invite later' : 'Private sync'
     return { result: { answers: { [text]: answer } } }
   }
+  // A resumed session, so the setup offer a newly loaded plugin makes stays out of the way.
   await $.session.start(sessionStart)
+  await $.classic.SessionStart({ session_id: fake.session, source: 'resume', cwd: CHECKOUT } as never)
+  await fake.clock.settle()
   expect(fake.authCalls).toEqual([])
   const setup = $.command.run(typedDelta('setup'))
   await fake.waitForLog(0, (log) => log.includes('Finish signing in'))

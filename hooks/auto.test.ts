@@ -3,6 +3,7 @@ import type { Engine } from 'claude-code'
 import {
   CHECKOUT, abovePrompt, fakeThreads, prompt, sessionEnd, sessionStart, shareCommand, testsWithHeldClockWait, turnComplete, turnStart, typedDelta,
 } from './fake-thread-commands'
+import { ONBOARDING_DECLINED, ONBOARDING_QUESTION } from './setup'
 
 tier('user')
 
@@ -167,6 +168,38 @@ describe('automatic activation', () => {
     fake.expectClean()
   })
 
+  test("the plugin's own question draws a hint beside each option, and no other question changes", async ($, on) => {
+    const fake = fakeThreads(on)
+    let drawn: any
+    // Stands in for Claude Code's dialog: records what it would draw, and answers with its own drawing.
+    on('ui.render', { component: 'AskUserQuestion' }, ($, e) => { drawn = e.props; return { type: 'engine', ref: 'dialog' } as never })
+    fake.organizations = [{ id: 'org-1', name: 'Guild', current: false }, { id: 'org-2', name: 'Zed', current: true }]
+    let answer!: (value: unknown) => void
+    fake.answerQuestion = () => new Promise((resolve) => { answer = resolve })
+    // A resumed session, so the setup offer stays out of the way.
+    await startAuto($, fake, 'resume')
+    const setup = $.command.run({ ...typedDelta('setup') } as never)
+    await fake.clock.settle()
+    const team = fake.questions.find((question) => question.questions[0].header === 'Team')!
+    const render = (questions: unknown[]) =>
+      $.ui.render({ component: 'AskUserQuestion', requestId: 'call-1', surface: 'terminal', props: { tool: 'AskUserQuestion', questions } } as never)
+    await render(team.questions)
+    // Only the selected team carries a hint; every other option is drawn as asked.
+    expect(drawn.questions[0].options.map((option: any) => [option.label, option.description || undefined])).toEqual([
+      ['Zed', 'Current team'], ['Guild', undefined], ['Cancel', undefined],
+    ])
+    // Claude's own question, with the same labels, is drawn as asked.
+    const theirs = [{ question: 'Which library?', header: 'Library', options: [{ label: 'Zed', description: '' }, { label: 'Guild', description: '' }] }]
+    await render(theirs)
+    expect(drawn.questions).toEqual(theirs)
+    // Once answered, the plugin's question leaves no hints behind.
+    answer({ result: { answers: { [team.questions[0].question]: 'Cancel' } } })
+    await setup
+    await render(team.questions)
+    expect(drawn.questions[0].options.every((option: any) => !option.description)).toBe(true)
+    fake.expectClean()
+  })
+
   test('a new session without a policy never holds a prompt behind the open setup offer', async ($, on) => {
     const fake = fakeThreads(on)
     let answer!: (value: unknown) => void
@@ -193,8 +226,8 @@ describe('automatic activation', () => {
     fake.answerQuestion = () => new Promise((resolve) => { answers.push(resolve) })
     await startAuto($, fake)
     // Claude draws only plain-text options; an option it cannot read would show as nonsense or fail.
-    expect(fake.questions[0].questions[0].options.map((option: { label: string }) => option.label)).toEqual(['Set it up', 'Not now'])
-    answers[0]!({ result: { answers: { [fake.questions[0].questions[0].question]: 'Set it up' } } })
+    expect(fake.questions[0].questions[0].options.map((option: { label: string }) => option.label)).toEqual(['Set up now', 'Not now'])
+    answers[0]!({ result: { answers: { [fake.questions[0].questions[0].question]: 'Set up now' } } })
     await fake.clock.settle()
     // The wizard's first question is open and never answered.
     expect(fake.questions).toHaveLength(2)
@@ -637,7 +670,7 @@ describe('offline recording', () => {
     // The membership check runs before staging, so nothing is created or queued.
     expect(fake.operations()).not.toContain('create')
     expect(binding(fake)).toBeUndefined()
-    expect(await drawn($)).toContain("isn't in this repo's organization")
+    expect(await drawn($)).toContain("isn't in this repo's team")
     expect(explained()).toBe(1)
     expect((await $.prompt.submit(prompt('one'))).drop).toBeUndefined()
     await fake.clock.settle()
@@ -646,7 +679,7 @@ describe('offline recording', () => {
 
     // The next new session in the repository keeps the band line without repeating the explanation.
     await startAuto($, fake, 'clear')
-    expect(await drawn($)).toContain("isn't in this repo's organization")
+    expect(await drawn($)).toContain("isn't in this repo's team")
     expect(explained()).toBe(1)
     fake.expectClean()
   })
@@ -670,7 +703,7 @@ describe('offline recording', () => {
     await fake.clock.settle()
     expect(binding(fake)).toBeUndefined()
     expect(queued.filter((path: string) => fake.files.has(path))).toEqual([])
-    expect(await drawn($)).toContain("isn't in this repo's organization")
+    expect(await drawn($)).toContain("isn't in this repo's team")
     // Nothing retries: the next prompt is accepted without another create or a new queue.
     expect((await $.prompt.submit(prompt('after'))).drop).toBeUndefined()
     await fake.clock.settle()
@@ -778,8 +811,8 @@ describe('setup dialogs and notices', () => {
     fake.answerQuestion = (question: any) => {
       const text = question.questions[0].question
       const offered: string[] = question.questions[0].options.map((option: { label: string }) => option.label)
-      const answer = text.startsWith('Delta syncs your sessions into a team') ? 'Acme'
-        : text.startsWith('Invite teammates') ? 'Not now'
+      const answer = text.startsWith('Create a team to more easily share') ? 'Acme'
+        : text.startsWith('Who should join') ? 'Invite later'
         : offered.find((label) => label.startsWith('Private sync'))
       return { result: { answers: { [text]: answer } } }
     }
@@ -787,6 +820,37 @@ describe('setup dialogs and notices', () => {
     await $.command.run({ ...typedDelta('setup') } as never)
     expect(fake.commands.filter((argv) => argv.includes('create'))).toEqual([[expect.any(String), '--json', 'org', 'create', '--', 'Acme']])
     expect(JSON.parse(fake.files.get(POLICY)!)).toEqual({ threads: { mode: 'private', organization: 'org-created' } })
+    fake.expectClean()
+  })
+
+  test('/delta share in a repository without a Git remote says so before asking or uploading anything', async ($, on) => {
+    const fake = fakeThreads(on)
+    fake.gitRemotes = []
+    await $.session.start(sessionStart)
+    const outcome = await fake.share($)
+    expect(outcome).toBe("Delta didn't share this session: This repository has no Git remote, and Delta needs one to sync it. Add a remote and push to it, then run /delta-share again.")
+    expect(fake.questions.filter((question) => question.questions[0].header === 'Delta share')).toEqual([])
+    expect(fake.cliSetups).toEqual([])
+    expect(fake.server.thread).toBeUndefined()
+    fake.expectClean()
+  })
+
+  test('syncing this session from /delta setup after Private sync uploads it privately, never to the team', async ($, on) => {
+    const fake = fakeThreads(on)
+    fake.answerQuestion = (question: any) => {
+      const text = question.questions[0].question
+      const offered: string[] = question.questions[0].options.map((option: { label: string }) => option.label)
+      return { result: { answers: { [text]: offered.find((label) => label === 'Zed' || label.startsWith('Private sync') || label === 'Sync it') } } }
+    }
+    await $.session.start(sessionStart)
+    const { text } = await $.command.run({ ...typedDelta('setup') } as never)
+    expect(text).toContain('Syncing this session now.')
+    await fake.clock.settle()
+    await fake.clock.advance(0)
+    await fake.clock.settle()
+    expect(fake.server.upload).toMatchObject({ visibility: 'private' })
+    expect(fake.operations()).not.toContain('share')
+    expect(fake.server.shared).toBe(false)
     fake.expectClean()
   })
 
@@ -863,7 +927,7 @@ describe('setup dialogs and notices', () => {
     fake.answerQuestion = (question: any) => {
       const text = question.questions[0].question
       const offered = question.questions[0].options.map((option: { label: string }) => option.label)
-      const answer = text.startsWith('Set up Delta syncing') ? 'Set it up'
+      const answer = text === ONBOARDING_QUESTION ? 'Set up now'
         : text.startsWith('Delta needs you to sign in') ? 'Sign in'
         : offered.find((label: string) => label === 'Zed' || label.startsWith('Manual'))
       return { result: { answers: { [text]: answer } } }
@@ -893,6 +957,33 @@ describe('setup dialogs and notices', () => {
     await startup()
     expect(fake.questions).toHaveLength(1)
     expect(fake.authCalls).toEqual([])
+    fake.expectClean()
+  })
+
+  test('a plugin installed into a running session offers setup there, and declining names /delta-setup', async ($, on) => {
+    const fake = fakeThreads(on)
+    fake.answerQuestion = (question: any) => ({
+      result: { answers: { [question.questions[0].question]: 'Not now' } },
+    })
+    // Claude reports no start (`classic.SessionStart`) to a plugin enabled in a running session.
+    await $.session.start(sessionStart)
+    await fake.clock.settle()
+    await fake.clock.advance(0)
+    await fake.clock.settle()
+    expect(fake.questions.map((question) => question.questions[0].question)).toEqual([ONBOARDING_QUESTION])
+    expect(fake.logs).toContain(ONBOARDING_DECLINED)
+    fake.expectClean()
+  })
+
+  test('a plugin installed into a running session never starts recording it automatically', async ($, on) => {
+    const fake = fakeThreads(on)
+    fake.files.set(POLICY, policy('private', 'org-1'))
+    await $.session.start(sessionStart)
+    await fake.clock.settle()
+    await fake.clock.advance(0)
+    await fake.clock.settle()
+    expect(fake.operations()).not.toContain('create')
+    expect(fake.questions).toEqual([])
     fake.expectClean()
   })
 })
