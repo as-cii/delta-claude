@@ -26,8 +26,8 @@ export function authLoginCommand(executable: string, windows: boolean): string {
 }
 
 /**
- * Authenticate only an explicit command, using the CLI's app-owned browser login. Only interactive
- * sessions share, join, or set up syncing, so sign-in always opens the browser and waits for it.
+ * Authenticate an interactive share, join, setup, or automatic activation using the CLI's app-owned
+ * browser login. Callers exclude headless sessions before allowing sign-in to open the browser and wait.
  */
 export async function requireAuthentication(
   host: AuthenticationHost,
