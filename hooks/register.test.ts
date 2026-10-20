@@ -61,7 +61,7 @@ describe('thread commands', () => {
     fake.claudeVersion = '2.1.287'
     await $.session.start(sessionStart)
     expect(fake.logs).toContain(claudeVersionWarning('2.1.287'))
-    expect((await $.command.run(typedDelta(''))).text).toContain('Usage: /delta')
+    expect((await $.command.run(typedDelta('help'))).text).toContain('Usage: /delta')
     await $.session.end(sessionEnd(fake.session))
   })
 
@@ -251,7 +251,7 @@ describe('thread commands', () => {
     const run = (command: string, args: string) => $.command.run({ ...shareCommand, command, args } as never)
     expect(await run('delta-org', 'current')).toEqual(await run('delta', 'org current'))
     expect(await run('delta-setup', '')).toEqual(await run('delta', 'setup'))
-    // A menu command missing its argument explains that command's own format.
+    // Headless, a menu command missing its argument explains that command's own format.
     expect((await run('delta-join', '')).text).toContain('Usage: /delta-join <link>')
     expect((await run('delta-org', '')).text).toContain('Usage: /delta-org list')
     fake.surfaces = ['terminal']

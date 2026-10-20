@@ -63,7 +63,8 @@ you name by email address. `/delta-share ada@example.com` invites them directly.
 
 ### Commands
 
-Each command also works as `/delta <command>`, such as `/delta share`.
+Each command also works as `/delta <command>`, such as `/delta share`. `/delta` on
+its own opens a menu of these actions.
 
 | Command | Description |
 | --- | --- |
@@ -75,6 +76,7 @@ Each command also works as `/delta <command>`, such as `/delta share`.
 | `/delta-org current` | Show the selected team |
 | `/delta-org switch <ID>` | Select a different team |
 | `/delta-org invite <email>…` | Invite people to the selected team |
+| `/delta-org manage` | Open the selected team's members page on the dashboard |
 
 Sharing and joining need an interactive Claude Code terminal or Desktop Code tab.
 
