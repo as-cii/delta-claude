@@ -10,7 +10,7 @@
     {
       "name": "delta",
       "source": "./",
-      "description": "Share Claude Code conversations and worktrees with collaborators through Delta."
+      "description": "Make Claude Code multiplayer. Collaborate on shared conversations and code, powered by DeltaDB."
     }
   ]
 }
