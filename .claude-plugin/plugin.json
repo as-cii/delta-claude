@@ -1,12 +1,17 @@
 {
   "name": "delta",
   "displayName": "Delta for Claude Code",
-  "version": "0.1.11",
+  "version": "0.1.12",
   "description": "Make Claude Code multiplayer. Collaborate on shared conversations and code, powered by DeltaDB.",
   "author": {
     "name": "Zed Industries"
   },
   "repository": "https://github.com/zed-industries/delta-claude",
+  "homepage": "https://delta.dev/cli",
+  "documentationUrl": "https://delta.dev/docs/cli/claude-code",
+  "supportUrl": "https://github.com/zed-industries/delta-claude/issues",
+  "privacyPolicyUrl": "https://zed.dev/privacy",
+  "termsOfServiceUrl": "https://zed.dev/terms",
   "icon": "./.claude-plugin/icon.png",
   "license": "AGPL-3.0-only"
 }
