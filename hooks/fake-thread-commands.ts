@@ -397,7 +397,8 @@ export function fakeThreads(on: On, options: {
     updateDiscoveries: 0,
     updateDebug: [] as string[],
     installUpdates: [] as { argv: string[]; timeoutMs?: number; env?: Record<string, string> }[],
-    updateStatus: 'up_to_date' as 'up_to_date' | 'update_available' | 'unsupported',
+    updateStatus: 'up_to_date' as 'up_to_date' | 'update_available' | 'unsupported' | 'updated' | 'update_started',
+    updateInstallStatus: 'updated' as 'updated' | 'update_started',
     updateCanInstall: true,
     updateMessage: 'Update test',
     updateFailure: undefined as undefined | 'old-cli' | 'network' | 'app-running' | 'malformed',
@@ -818,7 +819,7 @@ export function fakeThreads(on: On, options: {
         retryable: true,
       } }), exitCode: 1, stderr: '' }
     return { stdout: fake.updateFailure === 'malformed' ? '{}' : JSON.stringify({
-      schema_version: 1, status: argv.includes('--check') || !fake.updateCanInstall ? fake.updateStatus : 'updated',
+      schema_version: 1, status: argv.includes('--check') || !fake.updateCanInstall ? fake.updateStatus : fake.updateInstallStatus,
       current_version: '1.0.0', latest_version: '1.1.0', channel: 'stable',
       can_install: fake.updateCanInstall, message: fake.updateMessage,
     }), exitCode: 0, stderr: '' }

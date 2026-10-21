@@ -26,7 +26,11 @@ it never installs updates or opens a browser as part of this check. A failed che
 does not stop syncing or sharing.
 
 Run `/delta-update` (or `/delta update`) to update the installed Delta app and CLI,
-then restart Claude Code. Download and installation progress appears in the transcript
+then restart Claude Code once installation finishes. On Windows, the command may
+return after handing off to the installer, before installation finishes. Wait for
+the installer to finish, then run `delta update --check` to check the installation
+before restarting Claude Code or retrying the update.
+Download and installation progress appears in the transcript
 while the command runs. This does not update the Claude plugin itself.
 The startup notice offers this command only when the CLI can install the update.
 Otherwise, follow the CLI's platform-specific instructions: for example, run the

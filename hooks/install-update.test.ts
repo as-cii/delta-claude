@@ -66,6 +66,30 @@ for (const command of ['delta-update', 'delta'] as const)
     fake.expectClean()
   })
 
+test('an update reports installer handoff without claiming installation finished', async ($, on) => {
+  const fake = fakeThreads(on)
+  fake.updateInstallStatus = 'update_started'
+  fake.updateMessage = 'Check C:\\Delta\\update.log for installer diagnostics.'
+  await $.session.start(sessionStart)
+  const result = await $.command.run(typedDelta('update'))
+  expect(result.text).toBe('Delta update handoff to 1.1.0 was accepted; installation completion has not been confirmed. '
+    + 'Check C:\\Delta\\update.log for installer diagnostics. '
+    + 'Wait for the update process to finish, then run `delta update --check` to check the installation before restarting Claude Code or retrying /delta-update.')
+  fake.expectClean()
+})
+
+for (const status of ['updated', 'update_started'] as const)
+  test(`read-only checks reject ${status}`, async ($, on) => {
+    const fake = fakeThreads(on)
+    fake.updateStatus = status
+    await $.session.start(sessionStart)
+    await fake.clock.advance(0)
+    await fake.settleUntil(() => fake.updateDebug.some((text) =>
+      text.includes('Unexpected installation change reported by a read-only update check')))
+    expect(fake.logs.some((text) => text.includes('1.1.0'))).toBe(false)
+    fake.expectClean()
+  })
+
 test('a stalled explicit update times out and allows a later retry', async ($, on) => {
   const fake = fakeThreads(on)
   await $.session.start(sessionStart)
@@ -102,6 +126,18 @@ test('update replies require the negotiated schema and typed version fields', ()
     status: 'update_available', currentVersion: '1.0', latestVersion: '1.1', canInstall: true,
   })
   for (const changed of [{ schema_version: 2 }, { status: 'new_status' }, { latest_version: null }, { channel: 'unknown' }, { can_install: undefined }, { can_install: 'false' }])
+    expect(() => parseInstallUpdate(JSON.stringify({ ...result, ...changed }))).toThrow()
+})
+
+test('installer handoff requires a target version and installation capability', () => {
+  const result = { schema_version: 1, status: 'update_started', current_version: '1.0',
+    latest_version: '1.1', channel: 'stable', message: 'Installer launched', can_install: true }
+  expect(parseInstallUpdate(JSON.stringify(result))).toMatchObject({
+    status: 'update_started', currentVersion: '1.0', latestVersion: '1.1', canInstall: true,
+  })
+  for (const changed of [
+    { latest_version: null }, { latest_version: '' }, { can_install: false },
+  ])
     expect(() => parseInstallUpdate(JSON.stringify({ ...result, ...changed }))).toThrow()
 })
 

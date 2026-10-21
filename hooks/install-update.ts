@@ -13,6 +13,7 @@ export type UpdateHost = {
 type CommandForm = 'dedicated_command' | 'delta_subcommand'
 type UpdateResult = { canInstall: boolean } & (
   | { status: 'update_available' | 'updated'; currentVersion: string; latestVersion: string; message: string }
+  | { status: 'update_started'; currentVersion: string; latestVersion: string; message: string; canInstall: true }
   | { status: 'up_to_date' | 'unsupported'; currentVersion: string; latestVersion: string | null; message: string }
 )
 
@@ -25,11 +26,12 @@ export function parseInstallUpdate(stdout: string): UpdateResult {
   const failure = commandErrorFromEnvelope(value?.error, 'update')
   if (failure) throw failure
   if (value?.schema_version !== 1 || typeof value.can_install !== 'boolean' ||
-      !['up_to_date', 'update_available', 'updated', 'unsupported'].includes(value.status) ||
+      !['up_to_date', 'update_available', 'updated', 'update_started', 'unsupported'].includes(value.status) ||
       typeof value.current_version !== 'string' || !value.current_version ||
       !(value.latest_version === null || typeof value.latest_version === 'string' && value.latest_version) ||
       !['dev', 'trunk', 'stable'].includes(value.channel) || typeof value.message !== 'string' ||
-      (['update_available', 'updated'].includes(value.status) && !value.latest_version))
+      (['update_available', 'updated', 'update_started'].includes(value.status) && !value.latest_version) ||
+      (value.status === 'update_started' && value.can_install !== true))
     throw new Error(`Unexpected Delta update response. ${MANUAL_UPDATE}`)
   return {
     status: value.status, currentVersion: value.current_version,
@@ -72,6 +74,7 @@ export class InstallationUpdates {
       const result = await this.run(host, false, form)
       switch (result.status) {
         case 'updated': return `Updated Delta to ${result.latestVersion}. Restart Claude Code to use the updated installation.`
+        case 'update_started': return `Delta update handoff to ${result.latestVersion} was accepted; installation completion has not been confirmed. ${result.message} Wait for the update process to finish, then run \`delta update --check\` to check the installation before restarting Claude Code or retrying /delta-update.`
         case 'up_to_date': return `Delta ${result.currentVersion} is already up to date.`
         case 'unsupported': return `Delta cannot update this installation: ${result.message}`
         case 'update_available': return `Delta was not updated: ${result.message}`
@@ -147,7 +150,8 @@ export class InstallationUpdates {
         throw new Error(`${output.stderr.trim() || `Delta exited with code ${output.exitCode}`}. Retry /delta-update.`)
       }
       const result = parseInstallUpdate(output.stdout)
-      if (check && result.status === 'updated') throw new Error('Unexpected installation change reported by a read-only update check.')
+      if (check && (result.status === 'updated' || result.status === 'update_started'))
+        throw new Error('Unexpected installation change reported by a read-only update check.')
       return result
     }
     try { return await Promise.race([operation(), deadline]) }
