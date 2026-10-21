@@ -24,7 +24,7 @@ describe('Delta threads as subagents', () => {
       expect(looksLikeThreadLink(to)).toBe(false)
   })
 
-  test("what happened since a subagent last ran is everything after its own last item", () => {
+  test('what happened since a subagent last ran is everything after its own last item', () => {
     const own = (item: WatchItem): WatchItem => ({ ...item, author: { ...item.author!, actor_id: 'actor-own' } })
     const items = [
       message('prompt', 'user_message', null, 'Map the repo'),

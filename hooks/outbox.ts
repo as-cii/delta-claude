@@ -1,3 +1,4 @@
+import { cutsSurrogatePair } from './text'
 import { parseAppendReceipt } from './thread-commands'
 
 /** Split a durable JSONL record without cutting a UTF-16 surrogate pair. */
@@ -8,7 +9,7 @@ export function outboxChunks(line: string, sequence: number): string[] {
   let offset = 0
   while (offset < line.length) {
     let end = Math.min(offset + 900_000, line.length)
-    if (end < line.length && /[\uD800-\uDBFF]/.test(line.charAt(end - 1))) end--
+    if (end < line.length && cutsSurrogatePair(line, end)) end--
     chunks.push(line.slice(offset, end))
     offset = end
   }

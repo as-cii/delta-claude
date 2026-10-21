@@ -1,4 +1,5 @@
-import { DeltaCommandError, commandErrorFromEnvelope } from './thread-commands'
+import { errorText } from './text'
+import { commandErrorFromEnvelope, DeltaCommandError } from './thread-commands'
 
 type Exit = { code: number | null; signal: string | null }
 type Output = { stream: 'stdout' | 'stderr'; text: string }
@@ -9,7 +10,7 @@ export async function readCommandStream(
   stream: Stream, name: string, signal: AbortSignal,
   sleep: (milliseconds: number, signal: AbortSignal) => Promise<unknown>,
   timeoutMs = 120_000,
-  acceptsExit = (code: number | null, _stdout: string) => code === 0,
+  acceptsExit: (code: number | null, stdout: string) => boolean = (code) => code === 0,
 ): Promise<string> {
   const encoder = new TextEncoder()
   const limit = 16 * 1024 * 1024
@@ -20,6 +21,7 @@ export async function readCommandStream(
   void sleep(timeoutMs, deadline.signal).then(() => {
     timedOut = true
     stop()
+  // The deadline's sleep rejects when the command ends first and cancels it.
   }).catch(() => {})
   const chunks: string[] = []
   let bytes = 0
@@ -30,7 +32,7 @@ export async function readCommandStream(
       try { piece = await stream.next() }
       catch (error) {
         if (signal.aborted) throw new Error(`Delta ${name} cancelled`)
-        throw new DeltaCommandError('process_failed', `${name}: ${String(error)}`)
+        throw new DeltaCommandError('process_failed', `${name}: ${errorText(error)}`)
       }
       if (signal.aborted) throw new Error(`Delta ${name} cancelled`)
       if (timedOut) throw new DeltaCommandError('timeout', `Delta ${name} timed out`)
@@ -38,6 +40,7 @@ export async function readCommandStream(
         const stdout = chunks.join('')
         if (!acceptsExit(piece.value.code, stdout)) {
           let failure: DeltaCommandError | undefined
+          // Output that is not JSON carries no typed error; stderr then says what failed.
           try { failure = commandErrorFromEnvelope(JSON.parse(stdout)?.error, name) } catch {}
           throw failure ?? new DeltaCommandError('process_failed',
             `${name}: ${stderr || `exit ${piece.value.code ?? piece.value.signal ?? 'unknown'}`}`)

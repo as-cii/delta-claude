@@ -1,8 +1,13 @@
-//! Locate, parse, validate, and serialize the shared project policy.
-//!
-//! Every harness integration reads the same `.delta/settings.json` at the Git checkout root, so a
-//! repository opts its collaborators into automatic recording once. This module is pure: it never
-//! touches the filesystem or Git, keeping the decisions the wizard and activation make easy to test.
+/**
+ * Locate, parse, validate, and serialize the shared project policy.
+ *
+ * Every harness integration reads the same `.delta/settings.json` at the Git checkout root, so a
+ * repository opts its collaborators into automatic recording once. This module is pure: it never
+ * touches the filesystem or Git, keeping the decisions the wizard and activation make easy to test.
+ */
+
+import { isJsonObject } from './json'
+import { errorText } from './text'
 
 /** How a checkout records Claude Code sessions. `manual` records only through `/delta share` or a join. */
 export type ThreadMode = 'manual' | 'private' | 'organization'
@@ -32,10 +37,6 @@ export function policyPath(checkoutRoot: string): string {
   return `${checkoutRoot}/.delta/settings.json`
 }
 
-function isObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value)
-}
-
 /**
  * Read the effective policy from a file's text, or from `undefined` when there is none. A missing
  * file, a missing `threads` key, or a missing `mode` is unconfigured; malformed JSON or an invalid
@@ -45,13 +46,13 @@ export function readProjectPolicy(text: string | undefined): PolicyFile {
   if (text === undefined) return { policy: { mode: 'manual', configured: false } }
   let document: unknown
   try { document = JSON.parse(text) }
-  catch (error) { return { malformed: true, policy: { mode: 'manual', configured: false, problem: `it is not valid JSON (${String(error)})` } } }
-  if (!isObject(document))
+  catch (error) { return { malformed: true, policy: { mode: 'manual', configured: false, problem: `it is not valid JSON (${errorText(error)})` } } }
+  if (!isJsonObject(document))
     return { malformed: true, policy: { mode: 'manual', configured: false, problem: 'it does not contain a JSON object' } }
   const threads = document.threads
   if (threads === undefined)
     return { document, policy: { mode: 'manual', configured: false } }
-  if (!isObject(threads))
+  if (!isJsonObject(threads))
     return { document, policy: { mode: 'manual', configured: false, problem: 'its `threads` value is not an object' } }
   const mode = threads.mode
   if (mode === undefined)
@@ -61,7 +62,10 @@ export function readProjectPolicy(text: string | undefined): PolicyFile {
   const organization = threads.organization
   // Manual names the organization `/delta share` shares to, when setup chose one.
   if (mode === 'manual')
-    return { document, policy: { mode: 'manual', configured: true, ...typeof organization === 'string' && organization.trim() ? { organization } : {} } }
+    return {
+      document,
+      policy: { mode: 'manual', configured: true, ...typeof organization === 'string' && organization.trim() ? { organization } : {} },
+    }
   if (typeof organization !== 'string' || !organization.trim())
     return { document, policy: { mode: 'manual', configured: false, problem: `mode "${mode}" requires a non-empty organization` } }
   return { document, policy: { mode: mode as ThreadMode, organization, configured: true } }
@@ -74,8 +78,8 @@ export function readProjectPolicy(text: string | undefined): PolicyFile {
 export function serializeProjectPolicy(
   previous: Record<string, unknown> | undefined, mode: ThreadMode, organization?: string,
 ): string {
-  const document = isObject(previous) ? { ...previous } : {}
-  const threads = isObject(document.threads) ? { ...document.threads } : {}
+  const document = isJsonObject(previous) ? { ...previous } : {}
+  const threads = isJsonObject(document.threads) ? { ...document.threads } : {}
   threads.mode = mode
   if (organization === undefined) delete threads.organization
   else threads.organization = organization

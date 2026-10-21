@@ -1,7 +1,7 @@
 import { expect, test } from 'claude-code/testing'
 import {
   bandWidth, firstNames, formatSeconds, personColor, personKey, renderBand, shortLink, statusCurrentTurn,
-  statusSpinnerRunning, toolRowParts, type StatusSegment, type StatusState,
+  type StatusSegment, statusSpinnerRunning, type StatusState, toolRowParts,
 } from './status'
 import { cliFixture } from './cli-fixtures'
 import type { WatchItem } from './thread-commands'
@@ -162,7 +162,7 @@ test('long tool input keeps its start and end, fitting the available row width',
 })
 
 test('children report independently of an idle parent, with distinct statuses and stale readback', () => {
-  const child = { thread_id: 'child-1', kind: 'subagent' as const, name: 'Investigate build failures', status: 'queued' }
+  const child = { thread_id: 'child-1', reference: 'thread#s=child-1', kind: 'subagent' as const, name: 'Investigate build failures', status: 'queued' }
   const state = { ...live, children: [child] }
   const shown = (status: string) => text(renderBand({ ...state, children: [{ ...child, status }] }, WIDE).childActivity)
   expect(shown('queued')).toContain('queued')

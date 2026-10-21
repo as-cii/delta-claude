@@ -41,7 +41,7 @@ describe('content', () => {
     expect(capturedMessage({ ...row, content: [{ type: 'text', text: 'framing only' }] }, 'tool-message')).toBeUndefined()
   })
 
-  test('titles and kinds tool calls as Claude\'s ACP adapter does, with paths relative to the root', () => {
+  test("titles and kinds tool calls as Claude's ACP adapter does, with paths relative to the root", () => {
     const call = (name: string, input: unknown) => messageUpdates({ role: 'assistant', content: [
       { type: 'tool_use', id: 't1', name, input },
     ] }, 'm1', undefined, { root: '/repo/' })[0]

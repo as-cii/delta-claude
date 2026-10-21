@@ -12,7 +12,8 @@ export function bashMarkdown(text: string): string {
     const fence = delimiter(body, 3)
     return `${fence}\n${body}${body.endsWith('\n') ? '' : '\n'}${fence}`
   }
-  return parts.flatMap(([, tag, body]) => {
+  // Both groups always match; the defaults only satisfy the indexed-access check.
+  return parts.flatMap(([, tag = '', body = '']) => {
     if (tag === 'bash-input') {
       if (/[\r\n]/.test(body)) return [`Ran\n\n${fenced(body)}`]
       const fence = delimiter(body, 1)

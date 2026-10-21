@@ -1,11 +1,13 @@
-//! The menu bare `/delta` opens: which Delta action to run.
-//!
-//! Claude Code's command menu can't list a plugin command's subcommands, so `/delta` with nothing
-//! after it asks instead. Each answer becomes the `/delta` action its dedicated command runs, so the
-//! menu is another way in, not another flow. The questions are decided here, against an injected
-//! interaction; `register.tsx` runs the chosen action.
+/**
+ * The menu bare `/delta` opens: which Delta action to run.
+ *
+ * Claude Code's command menu can't list a plugin command's subcommands, so `/delta` with nothing
+ * after it asks instead. Each answer becomes the `/delta` action its dedicated command runs, so the
+ * menu is another way in, not another flow. The questions are decided here, against an injected
+ * interaction; `commands.ts` runs the chosen action.
+ */
 
-import { TYPE_SOMETHING, emailsIn, type Interaction } from './setup'
+import { emailsIn, type Interaction, TYPE_SOMETHING } from './setup'
 
 const HEADER = 'Delta'
 const SHARE = 'Share this session'
@@ -24,7 +26,7 @@ export type MenuStart = 'menu' | 'join' | 'team'
 /**
  * Ask which Delta action to run and answer it as a `/delta` action, such as `share` or `join <link>`.
  * Opened at `join` or `team`, going back leads to the full menu. Undefined when the person chose
- * nothing. Rejects with the interaction's `InteractionDismissed` or `InteractionUnavailable`.
+ * nothing. Rejects with the interaction's `InteractionDismissedError` or `InteractionUnavailableError`.
  */
 export async function chooseDeltaAction(interaction: Interaction, start: MenuStart = 'menu'): Promise<string | undefined> {
   for (let step = start; ; step = 'menu') {

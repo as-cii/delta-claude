@@ -1,3 +1,5 @@
+import { isJsonObject, jsonText } from './json'
+import { cutsSurrogatePair, errorText } from './text'
 import type { WatchComment, WatchCommentTarget, WatchItem } from './thread-commands'
 
 /** Kinds shown in the pane and announced as transcript rows. */
@@ -23,7 +25,7 @@ export const SNAPSHOT_TAIL = 5
  * at four characters a token); older items are left out behind one row naming how to read them, so
  * joining a long thread does not fill Claude's context.
  */
-export const SNAPSHOT_BUDGET = 400_000
+const SNAPSHOT_BUDGET = 400_000
 
 /** Claude's text nodes allow tabs and newlines, but reject other control characters. */
 export function conversationText(text: string): string {
@@ -42,7 +44,7 @@ export function conversationWebLink(value?: string): string | undefined {
 }
 
 /** The item's text, for kinds that carry `{ text }`. */
-export function itemText(item: WatchItem): string | undefined {
+function itemText(item: WatchItem): string | undefined {
   return typeof item.content.text === 'string' ? item.content.text : undefined
 }
 
@@ -107,7 +109,7 @@ export function itemMarkdown(item: WatchItem, thread: string): string {
 /** Event storage can include model-only instructions after its human-readable headline. */
 function eventText(item: WatchItem): string {
   const text = itemText(item) ?? ''
-  return text.split(/\n<(?:subthread-event|review-thread-event)\b/, 1)[0].trim().replace(/:$/, '')
+  return (text.split(/\n<(?:subthread-event|review-thread-event)\b/, 1)[0] ?? '').trim().replace(/:$/, '')
 }
 
 /** Emphasis, code and heading markers removed, since a `$.ui.log` line draws them literally. */
@@ -138,7 +140,7 @@ function clipWithNote(text: string, limit: number, thread: string): string {
   // Reserve the note's own length so the whole row stays within the limit.
   let end = Math.max(0, limit - readMoreNote(text.length, thread).length)
   if (end < 1) return readMoreNote(text.length, thread).trim()
-  if (/[\uD800-\uDBFF]/.test(text.charAt(end - 1))) end--
+  if (cutsSurrogatePair(text, end)) end--
   return text.slice(0, end) + readMoreNote(text.length - end, thread)
 }
 
@@ -187,7 +189,7 @@ export function middleTruncate(text: string, width: number): string {
   let head = Math.floor((width - 1) * 0.4)
   let tail = width - 1 - head
   // Never split a surrogate pair at either cut.
-  if (/[\uD800-\uDBFF]/.test(text.charAt(head - 1))) head--
+  if (cutsSurrogatePair(text, head)) head--
   if (/[\uDC00-\uDFFF]/.test(text.charAt(text.length - tail))) tail--
   return `${text.slice(0, head)}…${text.slice(text.length - tail)}`
 }
@@ -196,12 +198,12 @@ export function middleTruncate(text: string, width: number): string {
 function toolInput(input: unknown): string | undefined {
   if (input === undefined || input === null) return
   if (typeof input === 'string') return singleLine(input) || undefined
-  const record = input as Record<string, unknown>
-  for (const field of ['command', 'file_path', 'path', 'pattern', 'query', 'url']) {
-    const value = typeof record === 'object' ? record[field] : undefined
-    if (typeof value === 'string' && value.trim()) return singleLine(value)
-  }
-  return singleLine(json(input))
+  if (isJsonObject(input))
+    for (const field of ['command', 'file_path', 'path', 'pattern', 'query', 'url']) {
+      const value = input[field]
+      if (typeof value === 'string' && value.trim()) return singleLine(value)
+    }
+  return singleLine(jsonText(input))
 }
 
 /** Text flattened onto one line, since each `$.ui.log` call draws a single transcript line. */
@@ -209,11 +211,15 @@ function singleLine(text: string): string {
   return conversationText(text).replace(/\s+/g, ' ').trim()
 }
 
+/** The first eight bytes of the SHA-256 of `value`'s JSON, in hex: short, and stable across processes. */
+async function fingerprint(value: unknown): Promise<string> {
+  const bytes = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(JSON.stringify(value)))
+  return Array.from(new Uint8Array(bytes).subarray(0, 8), (byte) => byte.toString(16).padStart(2, '0')).join('')
+}
+
 /** Identifies what Claude was shown for an item; attribution lookups and moves do not change it. */
 export async function itemFingerprint(item: WatchItem): Promise<string> {
-  const bytes = await crypto.subtle.digest('SHA-256',
-    new TextEncoder().encode(JSON.stringify({ kind: item.kind, content: item.content })))
-  return Array.from(new Uint8Array(bytes).subarray(0, 8), (byte) => byte.toString(16).padStart(2, '0')).join('')
+  return fingerprint({ kind: item.kind, content: item.content })
 }
 
 /**
@@ -233,24 +239,25 @@ export function renderItem(item: WatchItem, thread: string, edited = false): str
     // The input section below carries the call's full arguments, so the label stays one bounded line.
     label = `tool call ${middleTruncate(singleLine(String(name)), TOOL_LINE_LIMIT)}${typeof tool.status === 'string' ? ` (${tool.status})` : ''}`
     const sections: string[] = []
-    if (tool.rawInput !== undefined) sections.push(`Input: ${clip(json(tool.rawInput), 2_000)}`)
-    for (const entry of Array.isArray(tool.content) ? tool.content as any[] : []) {
-      if (entry?.type === 'diff') {
+    if (tool.rawInput !== undefined) sections.push(`Input: ${clip(jsonText(tool.rawInput), 2_000)}`)
+    for (const entry of Array.isArray(tool.content) ? tool.content.filter(isJsonObject) : []) {
+      if (entry.type === 'diff') {
         const patch = typeof entry.patch === 'string' ? entry.patch : typeof entry.newText === 'string' ? entry.newText : ''
         sections.push(`Changed ${entry.path ?? 'a file'}:\n${clip(patch, SECTION_LIMIT)}`)
-      } else if (entry?.type === 'terminal') sections.push(`Terminal ${entry.terminalId ?? ''}`.trim())
-      else if (entry?.type === 'content') {
+      } else if (entry.type === 'terminal') sections.push(`Terminal ${entry.terminalId ?? ''}`.trim())
+      else if (entry.type === 'content') {
         const block = entry.content
-        sections.push(clip(block?.type === 'text' && typeof block.text === 'string' ? block.text : json(block), SECTION_LIMIT))
+        sections.push(clip(isJsonObject(block) && block.type === 'text' && typeof block.text === 'string'
+          ? block.text : jsonText(block), SECTION_LIMIT))
       }
     }
-    if (tool.rawOutput !== undefined && tool.rawOutput !== null) sections.push(`Output:\n${clip(json(tool.rawOutput), SECTION_LIMIT)}`)
+    if (tool.rawOutput !== undefined && tool.rawOutput !== null) sections.push(`Output:\n${clip(jsonText(tool.rawOutput), SECTION_LIMIT)}`)
     body = sections.join('\n')
   } else {
     label = item.kind.replace(/_/g, ' ')
     const text = itemText(item)
     const details = Object.fromEntries(Object.entries(item.content).filter(([key]) => text === undefined || key !== 'text'))
-    body = [text, Object.keys(details).length ? clip(json(details), SECTION_LIMIT) : undefined]
+    body = [text, Object.keys(details).length ? clip(jsonText(details), SECTION_LIMIT) : undefined]
       .filter((part) => part !== undefined).join('\n')
   }
   body = conversationText(body).trim()
@@ -290,14 +297,10 @@ export function removedItemRow(id: string, item?: WatchItem): string {
   return `[Delta] An earlier item (item ${id})${item ? ` from ${itemAuthor(item)}` : ''} was removed from the shared thread; disregard it.`
 }
 
-function json(value: unknown): string {
-  return typeof value === 'string' ? value : JSON.stringify(value) ?? String(value)
-}
-
 /** `text` cut at `limit` for a model-visible row, at a marker naming how to read the rest. */
 function clipForModel(text: string, limit: number, thread: string): string {
   if (text.length <= limit) return text
-  const end = /[\uD800-\uDBFF]/.test(text.charAt(limit - 1)) ? limit - 1 : limit
+  const end = cutsSurrogatePair(text, limit) ? limit - 1 : limit
   return text.slice(0, end) + `\n[… ${text.length - end} more characters not shown. Read the full text with ` +
     `\`delta thread show ${thread} --format messages --messages 1-20\`; messages are numbered from 1 across the ` +
     'whole thread, at most 20 per call; page forward (21-40, …).]'
@@ -340,7 +343,7 @@ function commentCreator(comment: WatchComment): string {
 }
 
 /** Numbered, `+` when added and `-` when deleted, as the lines read when the comment was made. */
-export function commentContextLines(target: WatchCommentTarget | null | undefined): string[] {
+function commentContextLines(target: WatchCommentTarget | null | undefined): string[] {
   if (target?.kind !== 'file') return []
   return target.regions.flatMap((region) => {
     const mark = region.status === 'added' ? '+' : region.status === 'deleted' ? '-' : ' '
@@ -351,7 +354,7 @@ export function commentContextLines(target: WatchCommentTarget | null | undefine
 /** One line of quoted context; `marked` is the part a comment is about, when the line shows more. */
 export type QuotedLine = { before: string; marked: string; after: string; emphasis: boolean }
 
-export const QUOTED_FILE_LINES = 2
+const QUOTED_FILE_LINES = 2
 
 /**
  * Quoted context is earlier material, so it is elided rather than wrapped. A short passage is shown in
@@ -402,7 +405,6 @@ function around(before: string, marked: string, after: string, width: number): Q
   }
 }
 
-
 export function commentMarkdown(comment: WatchComment, thread: string): string {
   return clipWithNote(conversationText(comment.text).trim(), MARKDOWN_LIMIT, thread)
 }
@@ -419,10 +421,7 @@ export function commentDisplay(comment: WatchComment, parent: WatchComment | und
 export async function commentFingerprint(comment: WatchComment, target: WatchCommentTarget | null | undefined): Promise<string> {
   // Which item a passage is in is the person's context; Claude's row never names it.
   const shown = target?.kind === 'transcript' ? { ...target, item_id: null } : target ?? null
-  const bytes = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(JSON.stringify({
-    text: comment.text, target: shown, chain: comment.chain, routed_to: comment.routed_to,
-  })))
-  return Array.from(new Uint8Array(bytes).subarray(0, 8), (byte) => byte.toString(16).padStart(2, '0')).join('')
+  return fingerprint({ text: comment.text, target: shown, chain: comment.chain, routed_to: comment.routed_to })
 }
 
 /**
@@ -459,7 +458,7 @@ export function renderComment(comment: WatchComment, target: WatchCommentTarget 
   return clipForModel(lines.join('\n'), ROW_LIMIT, thread)
 }
 
-export function removedCommentRow(id: string, comment?: WatchComment): string {
+function removedCommentRow(id: string, comment?: WatchComment): string {
   return `[Delta] An earlier comment (comment ${id})${comment ? ` from ${commentAuthor(comment)}` : ''} ` +
     'was withdrawn from the shared thread; disregard it.'
 }
@@ -467,7 +466,6 @@ export function removedCommentRow(id: string, comment?: WatchComment): string {
 function escapeMarkup(text: string): string {
   return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
 }
-
 
 /**
  * Remote items already added to Claude's transcript, each with the fingerprint of what was added, or
@@ -674,7 +672,8 @@ export class RemoteView {
       }
       const item = change.removed ? undefined : this.items.get(id)
       if (!item) {
-        if (change.removed && known !== undefined) return { id, text: removedItemRow(id, change.last as WatchItem | undefined), quiet: false }
+        if (change.removed && known !== undefined)
+          return { id, text: removedItemRow(id, change.last as WatchItem | undefined), quiet: false }
         continue
       }
       if (item.open) continue
@@ -766,7 +765,7 @@ export async function addRows(view: RemoteView, sink: RowSink): Promise<void> {
     if (!unsaved) return
     unsaved = 0
     try { await sink.save(view.ledger) }
-    catch (error) { if (sink.current()) sink.fail(`its record could not be saved (${String(error)})`) }
+    catch (error) { if (sink.current()) sink.fail(`its record could not be saved (${errorText(error)})`) }
   }
   try {
     while (sink.current() && !view.settled && !sink.held()) {
@@ -777,7 +776,7 @@ export async function addRows(view: RemoteView, sink: RowSink): Promise<void> {
       let result: { deny?: string }
       try { result = await sink.append(row) }
       catch (error) {
-        if (sink.current()) sink.fail(String(error))
+        if (sink.current()) sink.fail(errorText(error))
         continue
       }
       if (result.deny !== undefined) {

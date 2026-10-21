@@ -1,10 +1,10 @@
 import { describe, expect, test, tier } from 'claude-code/testing'
 import { cliFixture } from './cli-fixtures'
 import {
-  DeltaCommandError, JoinNotReadyError, appendFailure, classifyCommandFailure, contractRefusal, contractVersion, parseAppendReceipt,
-  parseThreadContract, parseThreadFork, parseThreadMount, permanentFailureAdvice,
-  parseWatchEvent, parseThreadStatus, validateJoinedMounts,
-  validateThreadFrontier, validateThreadCheckout, type ThreadReady, type ThreadStatus,
+  appendFailure, classifyCommandFailure, contractRefusal, contractVersion, DeltaCommandError, JoinNotReadyError,
+  parseAppendReceipt, parseThreadContract, parseThreadFork, parseThreadMount, parseThreadStatus, parseWatchEvent,
+  permanentFailureAdvice, type ThreadReady, type ThreadStatus, validateJoinedMounts, validateThreadCheckout,
+  validateThreadFrontier,
 } from './thread-commands'
 
 tier('user')
@@ -164,7 +164,7 @@ describe('thread watch', () => {
       [String.raw`/repo/a\b`, '/repo/a/b'],
       [String.raw`//server/share\delta`, '//server/share/delta'],
       [directory, directory.toLowerCase()],
-    ]) {
+    ] as const) {
       const run = () => validateJoinedMounts(state({ directory: actual }), [{ ...mount, directory: requested }])
       if (actual.startsWith('\\\\')) expect(run()).toBeUndefined()
       else expect(run).toThrow(JoinNotReadyError)

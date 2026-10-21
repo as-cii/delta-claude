@@ -1,6 +1,6 @@
 /** CLI boundary fixture and Claude host; watching never creates, mounts, or publishes. */
-import { expect, mock, type Engine, type MockClock, type Plugin, type TestRest } from 'claude-code/testing'
-import type { ApiMessage, ConfigRow, On, ProcessRunResult } from 'claude-code'
+import { type Engine, expect, mock, type MockClock, type Plugin, type TestRest } from 'claude-code/testing'
+import type { AgentInfo, ApiMessage, ConfigRow, On, ProcessRunResult } from 'claude-code'
 import type { ThreadState, ThreadUser, WatchChild, WatchComment, WatchItem } from './thread-commands'
 import { cliErrorCodes, cliFixture } from './cli-fixtures'
 import { MINIMUM_CLAUDE_VERSION } from './compatibility'
@@ -104,6 +104,16 @@ export const abovePrompt = {
   props: { hasSurvey: false, isWorking: false, maxRows: 12, bodyColumns: 80,
     scroll: { offset: 0, bodyRows: 12 }, view: {} },
 } as const
+
+/** Draw the band once, as JSON text: what the person sees, and a redraw that gives queued rows their hook context. */
+export async function drawBandText($: Engine): Promise<string> {
+  return JSON.stringify(await $.ui.render(abovePrompt))
+}
+
+/** A person's text message, as Claude's transcript holds it. */
+export function userText(value: string) {
+  return { role: 'user' as const, content: [{ type: 'text' as const, text: value }] }
+}
 /** The band's mark while the watch is live: the band draws it however its other parts change. */
 export const LIVE = JSON.stringify({ type: 'Text', props: { color: 'green' }, children: ['●'] })
 /** The band's mark while it connects, or reconnects past a drop's grace. */
@@ -243,6 +253,52 @@ export function testsWithHeldClockWait(test: (name: string, ...rest: TestRest) =
   }
 }
 
+/** Keep redrawing, as a live host does, until the plugin has drawn every row it had ready. */
+export async function drawReady($: Engine, fake: ReturnType<typeof fakeThreads>) {
+  for (let attempt = 0; attempt < 10; attempt++) {
+    const before = fake.rows.length
+    await drawBandText($)
+    // A row's draw is awaited by the row loop, so let its continuation queue the next one.
+    await fake.clock.settle()
+    if (fake.rows.length === before) return
+  }
+}
+
+export function expectNoSetupCommands(fake: ReturnType<typeof fakeThreads>, since: number) {
+  expect(fake.operations().slice(since).filter((operation) => ['create', 'attach', 'share'].includes(operation!)))
+    .toEqual([])
+}
+
+export function expectStagedRecords(fake: ReturnType<typeof fakeThreads>, sequences: number[]) {
+  const { pending } = fake.store.get(`session:${fake.session}`) as {
+    pending: { sequence: number, files: string[] }[]
+  }
+  expect(pending.map((entry) => entry.sequence)).toEqual(sequences)
+  expect(pending.every((entry) => entry.files.every((path) => fake.files.has(path)))).toBe(true)
+}
+
+export async function seedPending(
+  fake: ReturnType<typeof fakeThreads>, records: (Record<string, unknown> | string)[], execution?: Record<string, unknown>,
+) {
+  const binding = fake.store.get(`session:${fake.session}`) as any
+  const pending = []
+  for (const [index, record] of records.entries()) {
+    const sequence = index + 1
+    const line = (typeof record === 'string' ? record : JSON.stringify(record)) + '\n'
+    const file = `${CONFIG}/delta-plugin/outbox/${fake.session}/${sequence}-0.json`
+    const bytes = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(line))
+    const digest = Array.from(new Uint8Array(bytes), (byte) => byte.toString(16).padStart(2, '0')).join('')
+    fake.files.set(file, line)
+    pending.push({ sequence, files: [file], digest })
+  }
+  fake.store.set(`session:${fake.session}`, { ...binding, next: records.length + 1, pending, execution })
+}
+
+export function expectOfferedItems(fake: ReturnType<typeof fakeThreads>, ids: string[]) {
+  expect(fake.rows).toHaveLength(ids.length)
+  ids.forEach((id, index) => expect(fake.rows[index]).toContain(`(item ${id})`))
+}
+
 /**
  * Installs thread command responses, host, filesystem, and store beneath the plugin.
  *
@@ -280,12 +336,14 @@ export function fakeThreads(on: On, options: {
     holdCommandListFor: undefined as ((session: string) => Promise<void> | undefined) | undefined,
     root: undefined as string | undefined,
     claudeVersion: MINIMUM_CLAUDE_VERSION,
-    agents: [] as { id: string; description: string; type: string; status: string }[],
+    agents: [] as AgentInfo[],
     endSession: undefined as ((session: string) => Promise<unknown>) | undefined,
     clock: mock.clock(on) as MockClock,
     store: new Map<string, unknown>(),
     files: new FixtureFiles(),
     commands: [] as string[][],
+    /** The timeout each `delta --json org` command ran with, in order. */
+    orgTimeouts: [] as (number | undefined)[],
     watches: [] as Watch[],
     statusProcesses: [] as { closed: boolean; emittedBytes: number }[],
     violations: [] as string[],
@@ -345,10 +403,14 @@ export function fakeThreads(on: On, options: {
     agentMessages: new Map<string, ApiMessage[]>(),
     /** Each agent's own transcript rows, holding the Agent calls it made. */
     agentSummaries: new Map<string, { role: string; text: string; toolUses: { tool_use_id: string; tool: string; input: Record<string, unknown>; result?: unknown }[] }[]>(),
+    /** Agents whose transcript `session.messages({ agentId })` refuses to read, as the engine does for one it cannot. */
+    unreadableAgents: new Set<string>(),
     /** The background tasks the plugin stopped with TaskStop. */
     taskStops: [] as string[],
     /** Holds a spawn's answer, as Claude does while the agent's first hooks already run. */
     holdSpawn: undefined as Promise<void> | undefined,
+    /** A hook answers `agent.spawn` itself, so no subagent starts and no `agentId` comes back. */
+    spawnStartsNone: false,
     /** Every subagent append fails before accepting anything until cleared. */
     childAppendOffline: false,
     /** Turn sequences a subagent's thread fences, as if someone in Delta took the turn over. */
@@ -470,8 +532,11 @@ export function fakeThreads(on: On, options: {
       const thread = fake.server.thread!
       const shared = fake.server.shared
       const upload = fake.server.upload
+      const fixture = cliFixture('status')
       return {
-        ...cliFixture('status'),
+        ...fixture,
+        // Spreading the untyped fixture does not satisfy a required field, so name it.
+        title: fixture.title,
         thread_id: thread,
         url: shared || fake.server.registered ? urlOf() : null,
         access: {
@@ -632,8 +697,9 @@ export function fakeThreads(on: On, options: {
     },
   }
 
-  mock.env(((event, handler) => {
-    if (event === 'env.get') on(event, async ($, e, next) => {
+  // The kit's `On` is overloaded per event, which a forwarding wrapper cannot spell; `any` stays in this fake.
+  mock.env(((event: any, handler: any) => {
+    if (event === 'env.get') on(event, async ($: any, e: any, next: any) => {
       await fake.holdCliResolution?.()
       return handler($, e, next)
     })
@@ -672,6 +738,7 @@ export function fakeThreads(on: On, options: {
   on('session.version', () => ({ value: { version: fake.claudeVersion } }))
   on('agent.list', () => ({ value: fake.agents }))
   on('agent.spawn', async ($, e) => {
+    if (fake.spawnStartsNone) return { model: 'test-model' }
     const agentId = e.resume?.agentId ?? `agent${++fake.spawns}`
     if (fake.holdSpawn) await fake.holdSpawn
     fake.spawned.push({ agentId, prompt: e.prompt, cwd: e.cwd, resumed: e.resume !== undefined })
@@ -708,6 +775,8 @@ export function fakeThreads(on: On, options: {
     return { value: [theme] }
   })
   on('session.messages', async ($, e) => {
+    if (e.agentId !== undefined && fake.unreadableAgents.has(e.agentId))
+      return { value: { deny: `cannot read agent ${e.agentId}` } } as never
     if (e.agentId !== undefined)
       return { value: e.as === 'api' ? fake.agentMessages.get(e.agentId) ?? [] : fake.agentSummaries.get(e.agentId) ?? [] } as never
     if (e.as !== 'api') return { value: fake.summaries } as never
@@ -818,6 +887,12 @@ export function fakeThreads(on: On, options: {
   // Unhooked, Claude makes and removes a subagent's isolated git worktree itself.
   on('classic.WorktreeCreate', () => ({}))
   on('classic.WorktreeRemove', () => ({}))
+  /** Delta's telemetry counts each integration's commands, so every Delta command the plugin runs says it is Claude Code's. */
+  const expectLabelled = (argv: readonly string[], env: Record<string, string> | undefined) => {
+    if (/(^|[\\/])delta(\.exe)?$/i.test(argv[0] ?? '') && env?.DELTA_CLI_INTEGRATION !== 'claude_code')
+      fake.violations.push(`Delta command without the Claude Code label: ${argv.slice(1).join(' ')}`)
+  }
+
   async function updateOutput(argv: readonly string[]) {
     await fake.holdUpdate
     if (fake.updateFailure === 'old-cli')
@@ -835,6 +910,7 @@ export function fakeThreads(on: On, options: {
     }), exitCode: 0, stderr: '' }
   }
   on('process.run', async ($, e) => {
+    expectLabelled(e.argv, e.init?.env)
     const argv = [...e.argv]
     const output = (stdout: string, exitCode = 0, stderr = '') => {
       const bytes = new TextEncoder().encode(stdout)
@@ -866,6 +942,7 @@ export function fakeThreads(on: On, options: {
       return output(JSON.stringify({ status: 'signed_in', account: { account_id: 'user', login: 'tester' } }))
     if (parsed?.positionals[0] === 'org' && argv.includes('--json')) {
       fake.commands.push(argv)
+      fake.orgTimeouts.push(e.init?.timeoutMs)
       // Setup creates a team organization only when the account has none; the name follows `--`.
       if (parsed.positionals[1] === 'create' && argv.at(-2) === '--' && !(fake.organizations ?? []).length) {
         const organization = { id: 'org-created', name: parsed.positionals[2]!, current: false }
@@ -1034,6 +1111,7 @@ export function fakeThreads(on: On, options: {
     return deliver(((e as any).init?.stdin ?? '').split('\n').filter((line: string) => line.length), output)
   })
   on('process.spawn', async function* ($, e, next) {
+    expectLabelled(e.argv, e.env)
     if (e.argv[0] === '/selected/delta' && e.argv[1] === 'update') {
       fake.installUpdates.push({ argv: [...e.argv], env: e.env })
       yield { stream: 'stderr', text: 'Downloading Delta: ' }

@@ -1,5 +1,8 @@
 import { describe, expect, test } from 'claude-code/testing'
-import { InteractionDismissed, InteractionUnavailable, inviteResultsFrom, offerOnboarding, runSetupWizard, type Interaction, type SetupEnv } from './setup'
+import {
+  type Interaction, InteractionDismissedError, InteractionUnavailableError, inviteResultsFrom, offerOnboarding,
+  runSetupWizard, type SetupEnv,
+} from './setup'
 
 /** An environment over an in-memory file, with the questions answered from a queue. */
 function harness(options: {
@@ -41,8 +44,8 @@ function harness(options: {
       if (!offered.every((option) => typeof option === 'string')) throw new Error(`non-text options: ${JSON.stringify(offered)}`)
       asks.push({ question, options: askOptions })
       const answer = answers.shift()
-      if (answer === undefined) throw new InteractionDismissed('dismissed')
-      if (answer === '__unavailable__') throw new InteractionUnavailable('no API')
+      if (answer === undefined) throw new InteractionDismissedError('dismissed')
+      if (answer === '__unavailable__') throw new InteractionUnavailableError('no API')
       return answer
     },
     async log(text) { logs.push(text) },
@@ -357,7 +360,6 @@ describe('onboarding', () => {
       expect([...store.values()]).toEqual([true])
     }
   })
-
 
   test('the offer is recorded while its dialog is open, so a session starting meanwhile skips it', async () => {
     const { backend } = memoryStore()

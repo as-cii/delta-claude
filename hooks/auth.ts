@@ -1,6 +1,7 @@
 import type { EngineInterface } from 'claude-code'
 import { readCommandStream } from './command-reader'
 import { commandErrorFromEnvelope } from './thread-commands'
+import { isJsonObject, type JsonObject } from './json'
 
 /**
  * Delta needs something from the person first, such as signing in or accepting its beta terms on
@@ -9,10 +10,7 @@ import { commandErrorFromEnvelope } from './thread-commands'
  */
 export class AccessRequiredError extends Error {}
 
-/**
- * What sign-in needs from the session, as values and callbacks. Claude Code's loader refuses a
- * module that passes `$` across an import, so `register.tsx` builds this from `$` itself.
- */
+/** What sign-in needs from the session, as values and callbacks, so its tests can stand in for the session. */
 export type AuthenticationHost = {
   windows: boolean
   sleep: (milliseconds: number, signal: AbortSignal) => Promise<void>
@@ -81,19 +79,19 @@ export async function requireAuthentication(
         try { return code === 1 && typeof JSON.parse(stdout)?.status === 'string' } catch { return false }
       })
     await check()
-    let value: any
+    let value: unknown
     try { value = JSON.parse(text) } catch { throw new Error('Delta returned invalid authentication output; update Delta and retry') }
-    const failure = commandErrorFromEnvelope(value?.error, 'authentication')
+    const failure = isJsonObject(value) ? commandErrorFromEnvelope(value.error, 'authentication') : undefined
     if (failure) throw failure
-    if (!value || typeof value.status !== 'string')
+    if (!isJsonObject(value) || typeof value.status !== 'string')
       throw new Error('Delta returned no authentication status; update Delta and retry')
     return value
   }
   // Unaccepted beta terms need the person on the web, so opening them is offered rather than logged.
   // Here and for sign-in, a dismissed dialog, or a surface that cannot ask, declines like "Not now".
-  const resolveAccess = async (value: { status: string; reason?: string; message?: string; url?: string }) => {
+  const resolveAccess = async (value: JsonObject) => {
     if (value.reason !== 'terms_not_accepted') throw authFailure(value, recovery, retry)
-    const url = value.url ?? 'https://zed.dev/delta/terms'
+    const url = typeof value.url === 'string' ? value.url : 'https://zed.dev/delta/terms'
     const accept = 'Open the beta terms'
     const answer = await host.ask('Delta needs you to accept its beta terms before it can sync. Open them in your browser?',
       [accept, 'Not now']).catch(() => undefined)
@@ -129,7 +127,7 @@ export async function requireAuthentication(
     if (login.status === 'signed_in') return
     if (login.status === 'access_denied') return await resolveAccess(login)
     if (login.status !== 'pending') throw authFailure(login, recovery, retry)
-    const expires = Date.parse(login.expires_at)
+    const expires = typeof login.expires_at === 'string' ? Date.parse(login.expires_at) : NaN
     if (typeof login.login_id !== 'string' || !login.login_id || typeof login.url !== 'string' ||
         !/^https?:\/\//.test(login.url) || !Number.isFinite(expires))
       throw new Error('Delta returned an invalid sign-in link; update Delta and retry')
@@ -153,7 +151,8 @@ export async function requireAuthentication(
   }
 }
 
-function authFailure(value: { status: string; reason?: string; message?: string; url?: string }, recovery: string, retry: string): Error {
+/** The error for an authentication answer sign-in cannot continue from; its fields are as the CLI reported them. */
+function authFailure(value: JsonObject, recovery: string, retry: string): Error {
   switch (value.status) {
     // `requireAuthentication` offers to open the beta terms before reaching here.
     case 'access_denied': return new Error(`Delta access denied: ${value.message ?? 'account access is required'}.${value.url ? ` ${value.url}` : ''} ${recovery}`)

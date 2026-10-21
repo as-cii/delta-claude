@@ -1,6 +1,6 @@
 import { expect, test } from 'claude-code/testing'
 import { chooseDeltaAction, type MenuStart } from './delta-menu'
-import { InteractionDismissed, type Interaction } from './setup'
+import { type Interaction, InteractionDismissedError } from './setup'
 
 test('each menu answer becomes the action its dedicated command runs', async () => {
   const cases: [string[], string | undefined, MenuStart?][] = [
@@ -31,7 +31,7 @@ function scripted(answers: string[]): Interaction {
   return {
     async ask() {
       const answer = queue.shift()
-      if (answer === undefined) throw new InteractionDismissed('dismissed')
+      if (answer === undefined) throw new InteractionDismissedError('dismissed')
       return answer
     },
     async log() {},

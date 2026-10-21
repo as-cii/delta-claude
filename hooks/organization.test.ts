@@ -44,7 +44,7 @@ test('invalid organization syntax and CLI failures are returned without sharing'
   fake.organizationResult.exitCode = 1
   fake.organizationResult.stderr = 'organization is not a membership'
   expect(await $.command.run({ ...shareCommand, args: 'org switch --help' })).toEqual({
-    text: 'Delta team command failed: Error: organization is not a membership',
+    text: 'Delta team command failed: organization is not a membership',
   })
   expect(fake.commands).toEqual([['/selected/delta', 'org', 'switch', '--', '--help']])
   fake.organizationResult.exitCode = 0
@@ -52,7 +52,7 @@ test('invalid organization syntax and CLI failures are returned without sharing'
   fake.organizationResult.stdout = 'org_two\tSecond team\n'
   fake.organizationResult.isStdoutTruncated = true
   expect(await $.command.run({ ...shareCommand, args: 'org current' })).toEqual({
-    text: 'Delta team command failed: Error: Delta team output was truncated; check the selection with /delta-org current.',
+    text: 'Delta team command failed: Delta team output was truncated; check the selection with /delta-org current.',
   })
   expect(fake.exports).toBe(0)
   fake.expectClean()
@@ -71,5 +71,8 @@ test('bare /delta-org opens the selected team on the dashboard, and a headless s
   fake.surfaces = []
   expect(await run('manage')).toEqual({ text: "Manage Acme's members here: https://dashboard.zed.dev/org-2/members" })
   expect(fake.opened).toEqual(['https://dashboard.zed.dev/org-2/members'])
+  // Listing teams waits as long as any other Delta command, not the engine's shorter default.
+  expect(fake.orgTimeouts.length).toBeGreaterThan(0)
+  expect(fake.orgTimeouts.every((timeout) => timeout === 120_000)).toBe(true)
   fake.expectClean()
 })

@@ -1,5 +1,5 @@
 import { describe, expect, test, tier } from 'claude-code/testing'
-import { TitleScanner, TITLE_LIMIT, transcriptRead } from './title'
+import { TITLE_LIMIT, TitleScanner, transcriptRead } from './title'
 
 tier('user')
 
@@ -13,7 +13,7 @@ function scan(text: string, size = text.length) {
 }
 
 describe('session title', () => {
-  test('the last rename wins over any title Claude chose; otherwise Claude\'s latest', () => {
+  test("the last rename wins over any title Claude chose; otherwise Claude's latest", () => {
     const chosen = line({ type: 'ai-title', aiTitle: 'First guess', sessionId: 's' })
     const later = line({ type: 'ai-title', aiTitle: 'Better guess', sessionId: 's' })
     const renamed = line({ type: 'custom-title', customTitle: 'Mine', sessionId: 's' })

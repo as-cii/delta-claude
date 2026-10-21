@@ -1,3 +1,9 @@
+/**
+ * What the Delta CLI prints and what it means: the JSON answers of `delta --json` commands and the
+ * `thread watch` events, their parsers and validators, the errors and retry hints a failure carries,
+ * and the recording contract versions this plugin speaks.
+ */
+import { isFiniteNumber, isJsonObject, isNonEmptyString, isOneOf, isSafeInteger, type JsonObject } from './json'
 import { samePath } from './paths'
 
 export type ThreadState = {
@@ -129,15 +135,20 @@ export class DeltaCommandError extends Error {
 }
 
 /** Decode an envelope's `error` object; `name` prefixes the message with the command it came from. */
-export function commandErrorFromEnvelope(error: any, name?: string): DeltaCommandError | undefined {
-  if (typeof error?.code !== 'string' || typeof error.message !== 'string') return
-  const reason = typeof error.reason === 'string' && error.reason.length > 0 ? error.reason : undefined
+export function commandErrorFromEnvelope(error: unknown, name?: string): DeltaCommandError | undefined {
+  if (!isJsonObject(error) || typeof error.code !== 'string' || typeof error.message !== 'string') return
+  const reason = isNonEmptyString(error.reason) ? error.reason : undefined
   // A reason is a diagnostic, not the code's identity: show it only when it adds something.
   const label = reason && reason !== error.code ? `${error.code} (${reason})` : error.code
   return new DeltaCommandError(error.code, `${name ? `${name}: ` : ''}${label}: ${error.message}`, {
     ...typeof error.retryable === 'boolean' ? { retryable: error.retryable } : {},
-    ...Number.isFinite(error.retry_after_ms) && error.retry_after_ms >= 0 ? { retryAfterMs: error.retry_after_ms } : {},
+    ...isFiniteNumber(error.retry_after_ms) && error.retry_after_ms >= 0 ? { retryAfterMs: error.retry_after_ms } : {},
   }, reason)
+}
+
+/** The typed error an envelope carries, if any: what every CLI answer is checked for first. */
+function envelopeError(value: unknown): DeltaCommandError | undefined {
+  return isJsonObject(value) ? commandErrorFromEnvelope(value.error) : undefined
 }
 
 /**
@@ -169,14 +180,14 @@ export function classifyCommandFailure(error: unknown): FailureClass {
 export function permanentFailureAdvice(code: string, automatic = false, reason?: string): string {
   // Delta publishes an organization mismatch as `invalid_invocation`; only the reason tells it apart.
   if (reason === 'organization_mismatch')
-    return 'This thread already syncs to a different Delta team, so who can see it can\'t change'
+    return "This thread already syncs to a different Delta team, so who can see it can't change"
   if (['not_visible', 'authentication_required', 'wrong_account'].includes(code))
     return 'Check your Delta sign-in and access to this thread'
   if (code === 'organization_required')
     return 'Find your team with `/delta-org list`, then select it with `/delta-org switch <ID>`'
   if (code === 'not_shared')
     // An automatic session uploads by intent, so it recovers by retrying, not by publishing.
-    return automatic ? 'This repository hasn\'t finished setting up syncing with Delta' : 'Share the thread with /delta-share'
+    return automatic ? "This repository hasn't finished setting up syncing with Delta" : 'Share the thread with /delta-share'
   if (code === 'invalid_reference')
     return 'Fix the thread, worktree, path, or producer reference'
   if (['invalid_record', 'invalid_acknowledgment'].includes(code))
@@ -211,6 +222,7 @@ export function appendFailure(stdout: string, stderr: string, exitCode: number |
     try {
       const failure = commandErrorFromEnvelope(JSON.parse(line)?.error)
       if (failure) return failure
+    // A line that is not JSON is not an error envelope; the next one may be.
     } catch {}
   }
   return new DeltaCommandError('process_failed', stderr.trim() || `append exited ${exitCode ?? 'abnormally'}`)
@@ -221,27 +233,28 @@ export function appendFailure(stdout: string, stderr: string, exitCode: number |
  * events; a known event with a malformed shape is an error.
  */
 export function parseWatchEvent(line: string): WatchEvent | undefined {
-  const event = JSON.parse(line)
-  const failure = commandErrorFromEnvelope(event?.error)
+  const event: unknown = JSON.parse(line)
+  if (!isJsonObject(event)) throw new Error('Unexpected thread watch event; use matching CLI and plugin builds')
+  const failure = commandErrorFromEnvelope(event.error)
   if (failure) return { type: 'error', error: failure }
-  switch (event?.type) {
+  switch (event.type) {
     case 'ready':
-      if (nonempty(event.thread_id) && validProducer(event.producer))
+      if (isNonEmptyString(event.thread_id) && validProducer(event.producer))
         return { type: 'ready', thread_id: event.thread_id, producer: event.producer }
       break
     case 'item':
       if (validItem(event.item)) return { type: 'item', item: event.item }
       break
     case 'item.append':
-      if (nonempty(event.id) && typeof event.text === 'string') return { type: 'item.append', id: event.id, text: event.text }
+      if (isNonEmptyString(event.id) && typeof event.text === 'string') return { type: 'item.append', id: event.id, text: event.text }
       break
     case 'remove':
-      if (nonempty(event.id)) return { type: 'remove', id: event.id }
+      if (isNonEmptyString(event.id)) return { type: 'remove', id: event.id }
       break
     case 'live':
       return { type: 'live' }
     case 'turn':
-      if (['idle', 'running'].includes(event.state) && (event.turn_id === null || nonempty(event.turn_id)) &&
+      if (isOneOf(event.state, ['idle', 'running']) && (event.turn_id === null || isNonEmptyString(event.turn_id)) &&
           (event.user === null || validUser(event.user)))
         return { type: 'turn', state: event.state, turn_id: event.turn_id, user: event.user }
       break
@@ -259,109 +272,120 @@ export function parseWatchEvent(line: string): WatchEvent | undefined {
       if (validChild(event.child)) return { type: 'child', child: watchChild(event.child) }
       break
     case 'child.remove':
-      if (nonempty(event.thread_id)) return { type: 'child.remove', thread_id: event.thread_id }
+      if (isNonEmptyString(event.thread_id)) return { type: 'child.remove', thread_id: event.thread_id }
       break
     case 'worktrees':
-      if (Array.isArray(event.worktrees) && event.worktrees.every((tree: any) => nonempty(tree?.reference) && typeof tree.name === 'string'))
-        return { type: 'worktrees', worktrees: event.worktrees.map((tree: any) => ({ reference: tree.reference, name: tree.name })) }
+      if (Array.isArray(event.worktrees) && event.worktrees.every(validWorktreeName))
+        return { type: 'worktrees', worktrees: event.worktrees.map((tree) => ({ reference: tree.reference, name: tree.name })) }
       break
     case 'comment':
       if (validComment(event.comment)) return { type: 'comment', comment: event.comment }
       break
     case 'comment.remove':
-      if (nonempty(event.id)) return { type: 'comment.remove', id: event.id }
+      if (isNonEmptyString(event.id)) return { type: 'comment.remove', id: event.id }
       break
     default:
-      if (typeof event?.type === 'string') return
+      if (typeof event.type === 'string') return
   }
   throw new Error('Unexpected thread watch event; use matching CLI and plugin builds')
 }
 
-function validChild(child: any): child is WatchChild {
-  return nonempty(child?.thread_id) && nonempty(child.kind) &&
-    typeof child.name === 'string' && nonempty(child.status) && nonempty(child.reference)
+function validWorktreeName(tree: unknown): tree is { reference: string; name: string } {
+  return isJsonObject(tree) && isNonEmptyString(tree.reference) && typeof tree.name === 'string'
+}
+
+function validChild(child: unknown): child is WatchChild {
+  return isJsonObject(child) && isNonEmptyString(child.thread_id) && isNonEmptyString(child.kind) &&
+    typeof child.name === 'string' && isNonEmptyString(child.status) && isNonEmptyString(child.reference)
 }
 
 function watchChild(child: WatchChild): WatchChild {
   return { thread_id: child.thread_id, reference: child.reference, kind: child.kind, name: child.name, status: child.status }
 }
 
-function validComment(comment: any): comment is WatchComment {
-  return nonempty(comment?.id) && nonempty(comment.chain) && nonempty(comment.delivered_with) &&
-    (comment.after_id === null || nonempty(comment.after_id)) &&
-    (comment.routed_to === null || nonempty(comment.routed_to)) && validUser(comment.author) &&
+function validComment(comment: unknown): comment is WatchComment {
+  return isJsonObject(comment) && isNonEmptyString(comment.id) && isNonEmptyString(comment.chain) &&
+    isNonEmptyString(comment.delivered_with) &&
+    (comment.after_id === null || isNonEmptyString(comment.after_id)) &&
+    (comment.routed_to === null || isNonEmptyString(comment.routed_to)) && validUser(comment.author) &&
     Array.isArray(comment.co_authors) && comment.co_authors.every(validUser) && typeof comment.agent === 'boolean' &&
-    (comment.created_at === null || Number.isFinite(comment.created_at)) && typeof comment.text === 'string' &&
+    (comment.created_at === null || isFiniteNumber(comment.created_at)) && typeof comment.text === 'string' &&
     (comment.target === null || validCommentTarget(comment.target))
 }
 
 /** A target of a kind this plugin does not know is still a target; Delta may add kinds. */
-function validCommentTarget(target: any): boolean {
-  if (target?.kind === 'transcript')
-    return (target.item_id === null || nonempty(target.item_id)) && typeof target.quote === 'string'
-  if (target?.kind === 'file')
+function validCommentTarget(target: unknown): boolean {
+  if (!isJsonObject(target)) return false
+  if (target.kind === 'transcript')
+    return (target.item_id === null || isNonEmptyString(target.item_id)) && typeof target.quote === 'string'
+  if (target.kind === 'file')
     return typeof target.path === 'string' && typeof target.view === 'string' &&
-      (target.worktree === null || nonempty(target.worktree)) &&
+      (target.worktree === null || isNonEmptyString(target.worktree)) &&
       (target.selected === null || typeof target.selected === 'string') &&
-      Array.isArray(target.regions) && target.regions.every((region: any) =>
-        Number.isSafeInteger(region?.first_line) && Number.isSafeInteger(region.last_line) &&
+      Array.isArray(target.regions) && target.regions.every((region) =>
+        isJsonObject(region) && isSafeInteger(region.first_line) && isSafeInteger(region.last_line) &&
         typeof region.status === 'string' && typeof region.text === 'string')
-  return typeof target?.kind === 'string'
+  return typeof target.kind === 'string'
 }
 
-function validItem(item: any): item is WatchItem {
-  return nonempty(item?.id) && nonempty(item.kind) && (item.after_id === null || nonempty(item.after_id)) &&
-    (item.turn_id === null || nonempty(item.turn_id)) && (item.author === null || validUser(item.author)) &&
-    (item.created_at === null || Number.isFinite(item.created_at)) && typeof item.open === 'boolean' &&
-    item.content !== null && typeof item.content === 'object' && !Array.isArray(item.content)
+function validItem(item: unknown): item is WatchItem {
+  return isJsonObject(item) && isNonEmptyString(item.id) && isNonEmptyString(item.kind) &&
+    (item.after_id === null || isNonEmptyString(item.after_id)) &&
+    (item.turn_id === null || isNonEmptyString(item.turn_id)) && (item.author === null || validUser(item.author)) &&
+    (item.created_at === null || isFiniteNumber(item.created_at)) && typeof item.open === 'boolean' &&
+    isJsonObject(item.content)
 }
 
-function validUser(user: any): user is ThreadUser {
-  return (user?.user_id === null || nonempty(user?.user_id)) && (user.name === null || typeof user.name === 'string') &&
-    (user.actor_id === undefined || nonempty(user.actor_id))
+function validUser(user: unknown): user is ThreadUser {
+  return isJsonObject(user) && (user.user_id === null || isNonEmptyString(user.user_id)) &&
+    (user.name === null || typeof user.name === 'string') &&
+    (user.actor_id === undefined || isNonEmptyString(user.actor_id))
 }
 
 export function parseThreadStatus(line: string): ThreadStatus {
-  const status = JSON.parse(line)
-  const failure = commandErrorFromEnvelope(status?.error)
+  const status: unknown = JSON.parse(line)
+  const failure = envelopeError(status)
   if (failure) throw failure
-  if (status?.operation === 'status' && validBinding(status)) return status
+  if (isJsonObject(status) && status.operation === 'status' && validBinding(status)) return status
   throw new Error('Unexpected thread status; use matching CLI and plugin builds')
 }
 
-function validBinding(frame: any): boolean {
-  return nonempty(frame.thread_id) && (frame.url === null || nonempty(frame.url)) &&
+function validBinding(frame: JsonObject): frame is ThreadStatus {
+  return isNonEmptyString(frame.thread_id) && (frame.url === null || isNonEmptyString(frame.url)) &&
     (frame.title === null || typeof frame.title === 'string') &&
-    ['local_only', 'granted'].includes(frame.access?.state) &&
+    isJsonObject(frame.access) && isOneOf(frame.access.state, ['local_only', 'granted']) &&
     (frame.access.is_owner === null || typeof frame.access.is_owner === 'boolean') &&
-    (frame.visibility === null || ['private', 'organization', 'unlisted'].includes(frame.visibility)) &&
+    (frame.visibility === null || isOneOf(frame.visibility, ['private', 'organization', 'unlisted'])) &&
     (frame.upload === null || validUpload(frame.upload)) &&
     validWorktrees(frame.worktrees) && validProducer(frame.producer)
 }
 
-function validUpload(value: any): boolean {
-  return ['queued', 'uploading', 'uploaded', 'failed'].includes(value?.state) &&
-    (value.organization_id === null || nonempty(value.organization_id)) &&
-    (value.error === null || (typeof value.error?.code === 'string' &&
-      (value.error.reason === undefined || typeof value.error.reason === 'string') &&
-      typeof value.error.message === 'string'))
+function validUpload(value: unknown): boolean {
+  return isJsonObject(value) && isOneOf(value.state, ['queued', 'uploading', 'uploaded', 'failed']) &&
+    (value.organization_id === null || isNonEmptyString(value.organization_id)) &&
+    (value.error === null || validErrorObject(value.error))
 }
 
-function validProducer(value: any): boolean {
-  return value === null || (nonempty(value?.source) && nonempty(value.external_id) &&
-    Number.isSafeInteger(value.next_sequence) && value.next_sequence >= 1 &&
-    (value.actor_id === undefined || value.actor_id === null || nonempty(value.actor_id)) &&
+/** An error object as status reports one for an upload or an inspection. */
+function validErrorObject(error: unknown): boolean {
+  return isJsonObject(error) && typeof error.code === 'string' &&
+    (error.reason === undefined || typeof error.reason === 'string') && typeof error.message === 'string'
+}
+
+function validProducer(value: unknown): value is ThreadState['producer'] {
+  return value === null || (isJsonObject(value) && isNonEmptyString(value.source) && isNonEmptyString(value.external_id) &&
+    isSafeInteger(value.next_sequence) && value.next_sequence >= 1 &&
+    (value.actor_id === undefined || value.actor_id === null || isNonEmptyString(value.actor_id)) &&
     (value.turn === null || validTurn(value.turn)))
 }
 
-function validWorktrees(value: any): boolean {
-  if (value?.status === 'unavailable')
-    return typeof value.error?.code === 'string' && typeof value.error.message === 'string' &&
-      (value.error.reason === undefined || typeof value.error.reason === 'string')
-  return value?.status === 'available' && Array.isArray(value.items) && value.items.every((worktree: any) =>
-    nonempty(worktree?.reference) && Array.isArray(worktree.checkouts) &&
-    worktree.checkouts.every((checkout: any) => nonempty(checkout?.directory) &&
-      ['attached', 'inactive', 'detached', 'missing'].includes(checkout.state) &&
+function validWorktrees(value: unknown): boolean {
+  if (!isJsonObject(value)) return false
+  if (value.status === 'unavailable') return validErrorObject(value.error)
+  return value.status === 'available' && Array.isArray(value.items) && value.items.every((worktree) =>
+    isJsonObject(worktree) && isNonEmptyString(worktree.reference) && Array.isArray(worktree.checkouts) &&
+    worktree.checkouts.every((checkout) => isJsonObject(checkout) && isNonEmptyString(checkout.directory) &&
+      isOneOf(checkout.state, ['attached', 'inactive', 'detached', 'missing']) &&
       (checkout.active === undefined || typeof checkout.active === 'boolean')))
 }
 
@@ -375,13 +399,13 @@ function inspectionUnavailableMessage(error: { code: string; reason?: string; me
  * The oldest recording-output contract version this plugin speaks. Neither the plugin nor the CLI
  * has shipped, so nothing older is supported; raise this rather than keep a gate for an old CLI.
  */
-export const PLUGIN_CONTRACT_MIN = 6
+const PLUGIN_CONTRACT_MIN = 6
 /**
  * The newest recording-output contract version this plugin speaks. A capability added by a later
  * version is gated on the session's negotiated version (`contractVersion`) until `PLUGIN_CONTRACT_MIN`
  * reaches it.
  */
-export const PLUGIN_CONTRACT_MAX = 7
+const PLUGIN_CONTRACT_MAX = 7
 /**
  * The name Delta shows for this producer: the recording's attribution (`append --producer-name`)
  * and the harness beside a present person (`watch --participate`). Identity stays the source and
@@ -399,11 +423,11 @@ export type ThreadContract = { operation: 'contract'; min: number; max: number }
 
 /** Decode a `thread contract` result, or fail on a malformed one. */
 export function parseThreadContract(line: string): ThreadContract {
-  let result: any
+  let result: unknown
   try { result = JSON.parse(line) } catch { throw new Error('Unexpected thread contract; use matching CLI and plugin builds') }
-  const failure = commandErrorFromEnvelope(result?.error)
+  const failure = envelopeError(result)
   if (failure) throw failure
-  if (result?.operation !== 'contract' || !Number.isSafeInteger(result.min) || !Number.isSafeInteger(result.max) ||
+  if (!isJsonObject(result) || result.operation !== 'contract' || !isSafeInteger(result.min) || !isSafeInteger(result.max) ||
       result.min < 0 || result.max < result.min)
     throw new Error('Unexpected thread contract; use matching CLI and plugin builds')
   return { operation: 'contract', min: result.min, max: result.max }
@@ -417,11 +441,11 @@ export type ForkedThread = { thread_id: string }
  * typed error envelope.
  */
 export function parseThreadFork(stdout: string): ForkedThread {
-  let result: any
+  let result: unknown
   try { result = JSON.parse(stdout) } catch { throw new Error('Unexpected thread fork result; use matching CLI and plugin builds') }
-  const failure = commandErrorFromEnvelope(result?.error)
+  const failure = envelopeError(result)
   if (failure) throw failure
-  if (!nonempty(result?.thread_id))
+  if (!isJsonObject(result) || !isNonEmptyString(result.thread_id))
     throw new Error('Unexpected thread fork result; use matching CLI and plugin builds')
   return { thread_id: result.thread_id }
 }
@@ -481,16 +505,17 @@ export type MountedThread = { thread_id: string; owner: string; directory: strin
 export class JoinNotReadyError extends Error {}
 
 export function parseThreadMount(line: string, owner: string): MountedThread {
-  const result = JSON.parse(line)
-  const failure = commandErrorFromEnvelope(result?.error)
+  const result: unknown = JSON.parse(line)
+  const failure = envelopeError(result)
   if (failure) throw failure
-  if (result?.operation !== 'mounted' || !nonempty(result.thread_id) || result.owner !== owner ||
-      !nonempty(result.directory) || !Array.isArray(result.worktrees) ||
-      !result.worktrees.every((tree: any) => nonempty(tree?.reference) && nonempty(tree.name) && nonempty(tree.directory) && nonempty(tree.state)))
+  if (!isJsonObject(result) || result.operation !== 'mounted' || !isNonEmptyString(result.thread_id) || result.owner !== owner ||
+      !isNonEmptyString(result.directory) || !Array.isArray(result.worktrees) || !result.worktrees.every(validMount))
     throw new Error('Unexpected thread mount result; use matching CLI and plugin builds')
   return {
     thread_id: result.thread_id, owner, directory: result.directory,
-    worktrees: result.worktrees.map((tree: any) => ({ reference: tree.reference, name: tree.name, directory: tree.directory, state: tree.state })),
+    worktrees: result.worktrees.map((tree) => ({
+      reference: tree.reference, name: tree.name, directory: tree.directory, state: tree.state,
+    })),
   }
 }
 
@@ -509,21 +534,30 @@ export function validateJoinedMounts(state: ThreadState, mounts: readonly { refe
   }
 }
 
+function validMount(tree: unknown): tree is ThreadMount {
+  return isJsonObject(tree) && isNonEmptyString(tree.reference) && isNonEmptyString(tree.name) &&
+    isNonEmptyString(tree.directory) && isNonEmptyString(tree.state)
+}
+
 export function parseAppendReceipt(line: string, thread: string, sequence: number): AppendReceipt {
-  const ack = JSON.parse(line)
-  if (ack?.thread_id !== thread || ack.sequence !== sequence ||
-      !Number.isSafeInteger(ack.next_sequence) || ack.next_sequence <= sequence ||
-      typeof ack.duplicate !== 'boolean' || !nonempty(ack.version) ||
-      ack.operation !== 'appended' ||
-      !['recorded', 'fenced', 'duplicate'].includes(ack.disposition) ||
-      !(ack.turn_sequence === null || (Number.isSafeInteger(ack.turn_sequence) && ack.turn_sequence > 0 && ack.turn_sequence <= sequence)))
+  const ack: unknown = JSON.parse(line)
+  if (!isJsonObject(ack) || !validReceipt(ack, thread, sequence))
     throw new Error('Invalid thread acknowledgment; no delivery assumed')
   return ack
 }
 
-function validTurn(value: any): value is ThreadTurn {
-  return value && Number.isSafeInteger(value.sequence) && value.sequence > 0 &&
-    ['running', 'finished', 'superseded'].includes(value.status)
+function validReceipt(ack: JsonObject, thread: string, sequence: number): ack is AppendReceipt {
+  return ack.thread_id === thread && ack.sequence === sequence &&
+    isSafeInteger(ack.next_sequence) && ack.next_sequence > sequence &&
+    typeof ack.duplicate === 'boolean' && isNonEmptyString(ack.version) &&
+    ack.operation === 'appended' &&
+    isOneOf(ack.disposition, ['recorded', 'fenced', 'duplicate']) &&
+    (ack.turn_sequence === null || (isSafeInteger(ack.turn_sequence) && ack.turn_sequence > 0 && ack.turn_sequence <= sequence))
+}
+
+function validTurn(value: unknown): value is ThreadTurn {
+  return isJsonObject(value) && isSafeInteger(value.sequence) && value.sequence > 0 &&
+    isOneOf(value.status, ['running', 'finished', 'superseded'])
 }
 
 /** A reset client ledger must never cause re-import or sequence reuse. */
@@ -543,6 +577,3 @@ export function validateThreadFrontier(
     throw new Error('Delta is ahead of this Claude outbox. Restore the matching producer state; do not reuse sequence numbers.')
 }
 
-function nonempty(value: unknown): value is string {
-  return typeof value === 'string' && value.length > 0
-}

@@ -1,5 +1,6 @@
 import type { EngineInterface } from 'claude-code'
 import { DeltaCli } from './cli'
+import { errorText } from './text'
 import { commandErrorFromEnvelope } from './thread-commands'
 
 export type UpdateHost = {
@@ -18,7 +19,7 @@ type UpdateResult = { canInstall: boolean } & (
 )
 
 const MANUAL_UPDATE = 'Update your Delta installation from https://delta.dev, then restart Claude Code and retry /delta-update.'
-class UnsupportedUpdateCommand extends Error {}
+class UnsupportedUpdateCommandError extends Error {}
 
 /** Parses the versioned installation-update response, independently of the thread protocol. */
 export function parseInstallUpdate(stdout: string): UpdateResult {
@@ -60,8 +61,9 @@ export class InstallationUpdates {
         await host.log(`Delta update check: ${result.message}`, 'transcript')
     } catch (error) {
       if (revision !== this.revision) return
-      await host.log(`Delta update check: ${String(error)}`,
-        error instanceof UnsupportedUpdateCommand ? 'transcript' : 'debug').catch(() => {})
+      // The check is optional: if even its report fails, startup goes on without it.
+      await host.log(`Delta update check: ${errorText(error)}`,
+        error instanceof UnsupportedUpdateCommandError ? 'transcript' : 'debug').catch(() => {})
     }
   }
 
@@ -78,10 +80,15 @@ export class InstallationUpdates {
         case 'up_to_date': return `Delta ${result.currentVersion} is already up to date.`
         case 'unsupported': return `Delta cannot update this installation: ${result.message}`
         case 'update_available': return `Delta was not updated: ${result.message}`
+        default: {
+          const unreachable: never = result
+          return unreachable
+        }
       }
     } catch (error) {
+      // The person reads the failure in the command's answer below; the debug copy is best effort.
       await host.log(`Delta installation update failed: ${String(error)}`, 'debug').catch(() => {})
-      return `Delta installation update failed: ${String(error)}`
+      return `Delta installation update failed: ${errorText(error)}`
     } finally {
       this.updating = false
     }
@@ -143,7 +150,7 @@ export class InstallationUpdates {
       if (output.isStdoutTruncated || output.isStderrTruncated)
         throw new Error('Delta update output was truncated. Retry /delta-update.')
       if (output.exitCode !== 0 && /(?:unrecognized|unknown|unexpected|invalid).*(?:subcommand|argument|update|--check|--json)/i.test(output.stderr))
-        throw new UnsupportedUpdateCommand(`This Delta CLI does not support installation updates. ${MANUAL_UPDATE}`)
+        throw new UnsupportedUpdateCommandError(`This Delta CLI does not support installation updates. ${MANUAL_UPDATE}`)
       if (output.exitCode !== 0) {
         // Typed failures use the same envelope as the rest of the CLI.
         if (output.stdout.trim().startsWith('{')) parseInstallUpdate(output.stdout)

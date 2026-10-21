@@ -1,7 +1,7 @@
-import { expect, test as kitTest, tier } from 'claude-code/testing'
-import type { Engine } from 'claude-code'
+import { type Engine, expect, test as kitTest, tier } from 'claude-code/testing'
 import {
-  CHECKOUT, abovePrompt, fakeThreads, prompt, sessionStart, sessionEnd, shareCommand, testsWithHeldClockWait, turnComplete, turnStart, typedDelta,
+  abovePrompt, CHECKOUT, fakeThreads, prompt, sessionEnd, sessionStart, shareCommand, testsWithHeldClockWait,
+  turnComplete, turnStart, typedDelta,
 } from './fake-thread-commands'
 import { authLoginCommand } from './auth'
 
@@ -171,7 +171,7 @@ test('share signs in an existing installation before exporting, then continues o
   expect(await shared).toBe(`https://delta.dev/join/${fake.shareId}`)
   await $.session.end(sessionEnd(fake.session))
   const calls = fake.authCalls.length
-  await $.session.start({ ...sessionStart, reason: 'resume' })
+  await $.session.start({ ...sessionStart, reason: 'resume' } as never)
   await fake.clock.advance(0)
   expect(fake.authCalls).toHaveLength(calls)
   fake.expectClean()
@@ -286,7 +286,7 @@ test('running /delta-share again while the beta terms are awaited offers to stop
   expect((await $.command.run(shareCommand)).text).toBeUndefined()
   await fake.clock.settle()
   expect(fake.questions.at(-1)?.questions[0].question).toBe('Delta is waiting for you to accept its beta terms in your browser. Stop waiting?')
-  expect(fake.logs).toContain('Stopped waiting for Delta\'s beta terms. Run /delta-share or /delta-join <link> again to accept them.')
+  expect(fake.logs).toContain("Stopped waiting for Delta's beta terms. Run /delta-share or /delta-join <link> again to accept them.")
   expect(fake.logs.join('\n')).not.toContain('Delta sharing failed')
   // Nothing polls once stopped, and a new share can start.
   const polls = fake.authCalls.length

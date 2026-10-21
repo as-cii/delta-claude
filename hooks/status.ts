@@ -1,3 +1,7 @@
+/**
+ * What the band above the prompt shows, worked out from the watch and progress state without `$`:
+ * the turn it reports, the people and children it lists, and the rows it lays out. `band.tsx` draws it.
+ */
 import { conversationText, itemAuthor, middleTruncate, toolCallParts } from './conversation'
 import type { ThreadTurn, WatchChild, WatchEvent, WatchItem } from './thread-commands'
 
@@ -126,9 +130,15 @@ export function statusSpinnerRunning(state: Pick<StatusState, 'progress' | 'conn
       !!state.children?.some((child) => child.status === 'running')))
 }
 
-const CHILD_PRIORITY: Record<string, number> = {
+const UNKNOWN_CHILD_PRIORITY = 5
+const CHILD_PRIORITY: Readonly<Record<string, number>> = {
   failed: 0, running: 1, waiting_for_synchronization: 2, queued: 3, preparing: 4,
-  unknown: 5, completed: 6, stopped: 7,
+  unknown: UNKNOWN_CHILD_PRIORITY, completed: 6, stopped: 7,
+}
+
+/** Where a child of `status` sorts in the band; a status this plugin does not know sorts as `unknown`. */
+function childPriority(status: string): number {
+  return CHILD_PRIORITY[status] ?? UNKNOWN_CHILD_PRIORITY
 }
 
 function childState(status: string, stale: boolean): string {
@@ -138,10 +148,9 @@ function childState(status: string, stale: boolean): string {
 }
 
 /** Show one representative child and count the rest without conflating their state with the parent turn. */
-export function childStatus(children: readonly WatchChild[], stale: boolean, frame: string, room: number): StatusSegment[] {
+function childStatus(children: readonly WatchChild[], stale: boolean, frame: string, room: number): StatusSegment[] {
   if (!children.length) return []
-  const ordered = [...children].sort((a, b) =>
-    (CHILD_PRIORITY[a.status] ?? CHILD_PRIORITY.unknown) - (CHILD_PRIORITY[b.status] ?? CHILD_PRIORITY.unknown))
+  const ordered = [...children].sort((a, b) => childPriority(a.status) - childPriority(b.status))
   const child = ordered[0]!
   const status = childState(child.status, stale)
   const counts = new Map<string, number>()
@@ -241,7 +250,8 @@ export function bandWidth(band: BandView, terminal: boolean): number {
   const conflict = band.conflict ? 2 + textWidth(band.conflict.fork) + 2 + textWidth(band.conflict.discard) : 0
   const share = band.share ? 2 + textWidth(band.share.label) : 0
   const right = width(band.right)
-  return (terminal ? BAR_PADDING : 0) + width([band.mark, ...band.label]) + link + audience + copy + share + conflict + (right ? MIN_GAP + right : 0)
+  return (terminal ? BAR_PADDING : 0) + width([band.mark, ...band.label]) + link + audience + copy + share + conflict +
+    (right ? MIN_GAP + right : 0)
 }
 
 /** What gives way as the row narrows, each step keeping the ones before it. */

@@ -1,5 +1,6 @@
 import type { ApiMessage } from 'claude-code'
 import { bashMarkdown } from './bash'
+import { isJsonObject, type JsonObject, jsonText } from './json'
 
 type RecordValue = Record<string, unknown>
 export type Update = RecordValue & { sessionUpdate: string }
@@ -35,13 +36,8 @@ export function capturedMessage(message: {
       ? { ...block, text: bashMarkdown(block.text) } : block) }
 }
 
-function object(value: unknown): RecordValue | undefined {
-  return value !== null && typeof value === 'object' && !Array.isArray(value)
-    ? value as RecordValue : undefined
-}
-
-function text(value: unknown): string {
-  return typeof value === 'string' ? value : JSON.stringify(value) ?? String(value)
+function object(value: unknown): JsonObject | undefined {
+  return isJsonObject(value) ? value : undefined
 }
 
 function base64(value: unknown): value is string {
@@ -58,8 +54,8 @@ function blocks(value: unknown): RecordValue[] {
   if (!Array.isArray(value)) return value == null ? [] : blocks([value])
   return value.map((item) => {
     const block = object(item)
-    if (!block) return { type: 'text', text: text(item) }
-    if (!validOptionalFields(block)) return { type: 'text', text: text(block) }
+    if (!block) return { type: 'text', text: jsonText(item) }
+    if (!validOptionalFields(block)) return { type: 'text', text: jsonText(block) }
     if (block.type === 'text' && typeof block.text === 'string')
       return { type: 'text', text: block.text, ...contentFields(block) }
     if (block.type === 'image') {
@@ -73,7 +69,7 @@ function blocks(value: unknown): RecordValue[] {
     }
     if (block.type === 'resource_link' && typeof block.uri === 'string')
       return {
-        type: 'resource_link', uri: block.uri, name: text(block.name ?? block.uri),
+        type: 'resource_link', uri: block.uri, name: jsonText(block.name ?? block.uri),
         ...optionalFields(block, ['title', 'description', 'icons', 'mimeType', 'size', 'annotations', '_meta']),
       }
     if (block.type === 'audio' && base64(block.data) && typeof block.mimeType === 'string')
@@ -111,7 +107,7 @@ function blocks(value: unknown): RecordValue[] {
         }
     }
     // Unknown content remains visible and recoverable rather than silently disappearing.
-    return { type: 'text', text: text(block) }
+    return { type: 'text', text: jsonText(block) }
   })
 }
 
@@ -252,7 +248,7 @@ export function toolInfo(name: string, input: unknown, root?: string): { title: 
     }
     case 'TodoWrite':
       return info(Array.isArray(value.todos)
-        ? `Update TODOs: ${value.todos.map((todo) => text(object(todo)?.content ?? todo)).join(', ')}`
+        ? `Update TODOs: ${value.todos.map((todo) => jsonText(object(todo)?.content ?? todo)).join(', ')}`
         : 'Update TODOs', 'think')
     default:
       return info(name || 'Unknown Tool', 'other')
@@ -302,7 +298,7 @@ export function messageUpdates(
     } else if (block.type === 'tool_use' && typeof block.id === 'string') {
       if (isOmittedTool(block.name)) continue
       flush()
-      const name = text(block.name ?? 'Tool')
+      const name = jsonText(block.name ?? 'Tool')
       updates.push({
         sessionUpdate: 'tool_call_update',
         toolCallId: block.id,

@@ -1,17 +1,23 @@
-//! The `/delta setup` wizard and the once-per-repository onboarding offer.
-//!
-//! Both write the shared project policy and never commit it. Every question, filesystem read, and
-//! write is injected, so the decisions here are exercised without a live Claude UI or Git checkout;
-//! `register.tsx` supplies the real Claude Code bindings.
+/**
+ * The `/delta setup` wizard and the once-per-repository onboarding offer.
+ *
+ * Both write the shared project policy and never commit it. Every question, filesystem read, and
+ * write is injected, so the decisions here are exercised without a live Claude UI or Git checkout;
+ * `interaction.ts` supplies the real Claude Code bindings.
+ */
 
-import { policyPath, readProjectPolicy, recordsAutomatically, serializeProjectPolicy, type PolicyFile, type ThreadMode } from './project-policy'
+import {
+  type PolicyFile, policyPath, readProjectPolicy, recordsAutomatically, serializeProjectPolicy, type ThreadMode,
+} from './project-policy'
 import { AccessRequiredError } from './auth'
+import { errorText } from './text'
 import { commandErrorFromEnvelope, contractRefusal, type ThreadContract } from './thread-commands'
+import { isJsonObject, isNonEmptyString, isOneOf, type JsonObject } from './json'
 
 /** A question could not be shown: this Claude has no interactive question API. */
-export class InteractionUnavailable extends Error {}
+export class InteractionUnavailableError extends Error {}
 /** The person dismissed the question. */
-export class InteractionDismissed extends Error {}
+export class InteractionDismissedError extends Error {}
 
 /** One answer a question offers: a plain-text label, which is also what the question answers. */
 export type AskOption = string
@@ -26,7 +32,7 @@ export type AskOptions = readonly AskOption[] | {
 
 /** The interactive surface the wizard and onboarding speak through. */
 export type Interaction = {
-  /** Ask one question and answer the chosen or typed label; rejects only with `InteractionDismissed` or `InteractionUnavailable`. */
+  /** Ask one question and answer the chosen or typed label; rejects only with `InteractionDismissedError` or `InteractionUnavailableError`. */
   ask(question: string, options: AskOptions): Promise<string>
   log(text: string, to?: 'transcript' | 'debug'): Promise<void>
 }
@@ -89,25 +95,27 @@ export type SetupEnv = {
 }
 
 /** Validate the parsed body of `delta --json org list`, keeping the CLI's typed error envelope. */
-export function organizationsFrom(result: any): Organization[] {
-  const failure = commandErrorFromEnvelope(result?.error)
+export function organizationsFrom(result: JsonObject): Organization[] {
+  const failure = commandErrorFromEnvelope(result.error)
   if (failure) throw failure
-  if (!Array.isArray(result?.organizations) ||
-      !result.organizations.every((org: any) => typeof org?.id === 'string' && org.id &&
-        typeof org.name === 'string' && typeof org.current === 'boolean'))
+  if (!Array.isArray(result.organizations) || !result.organizations.every(isListedOrganization))
     throw new Error('Unexpected organization list; use matching CLI and plugin builds')
-  return result.organizations.map((org: any) => ({
+  return result.organizations.map((org) => ({
     id: org.id, name: org.name, current: !!org.current,
     ...typeof org.personal === 'boolean' ? { personal: org.personal } : {},
   }))
 }
 
+function isListedOrganization(org: unknown): org is JsonObject & { id: string; name: string; current: boolean } {
+  return isJsonObject(org) && isNonEmptyString(org.id) && typeof org.name === 'string' && typeof org.current === 'boolean'
+}
+
 /** Validate the parsed body of `delta --json org create`, keeping the CLI's typed error envelope. */
-export function createdOrganizationFrom(result: any): Organization {
-  const failure = commandErrorFromEnvelope(result?.error)
+export function createdOrganizationFrom(result: JsonObject): Organization {
+  const failure = commandErrorFromEnvelope(result.error)
   if (failure) throw failure
-  const org = result?.organization
-  if (result?.operation !== 'created' || typeof org?.id !== 'string' || !org.id || typeof org.name !== 'string')
+  const org = result.organization
+  if (result.operation !== 'created' || !isJsonObject(org) || !isNonEmptyString(org.id) || typeof org.name !== 'string')
     throw new Error('Unexpected organization creation result; use matching CLI and plugin builds')
   return { id: org.id, name: org.name, current: !!org.current }
 }
@@ -116,15 +124,18 @@ export function createdOrganizationFrom(result: any): Organization {
 export type InviteResult = { email: string; invited: true } | { email: string; invited: false; message: string }
 
 /** Validate the parsed body of `delta --json org invite`, keeping the CLI's typed error envelope. */
-export function inviteResultsFrom(result: any): InviteResult[] {
-  const failure = commandErrorFromEnvelope(result?.error)
+export function inviteResultsFrom(result: JsonObject): InviteResult[] {
+  const failure = commandErrorFromEnvelope(result.error)
   if (failure) throw failure
-  if (result?.operation !== 'invited' || !Array.isArray(result.results) ||
-      !result.results.every((entry: any) => typeof entry?.email === 'string' && ['invited', 'failed'].includes(entry.status)))
+  if (result.operation !== 'invited' || !Array.isArray(result.results) || !result.results.every(isInviteEntry))
     throw new Error('Unexpected invitation result; use matching CLI and plugin builds')
-  return result.results.map((entry: any): InviteResult => entry.status === 'invited'
+  return result.results.map((entry): InviteResult => entry.status === 'invited'
     ? { email: entry.email, invited: true }
     : { email: entry.email, invited: false, message: String(entry.message ?? entry.reason ?? 'failed') })
+}
+
+function isInviteEntry(entry: unknown): entry is JsonObject & { email: string; status: 'invited' | 'failed' } {
+  return isJsonObject(entry) && typeof entry.email === 'string' && isOneOf(entry.status, ['invited', 'failed'])
 }
 
 /** Say which addresses were invited to `target` and which were not, and why. */
@@ -233,7 +244,7 @@ const MAX_ORGANIZATION_OPTIONS = 3
 const CANCELLED: SetupOutcome = { status: 'cancelled', text: 'Left the existing Delta settings untouched.' }
 
 const UNAVAILABLE_NOTICE =
-  'This Claude build cannot show /delta-setup\'s questions. Update Claude Code, or edit .delta/settings.json at the checkout root by hand.'
+  "This Claude build cannot show /delta-setup's questions. Update Claude Code, or edit .delta/settings.json at the checkout root by hand."
 
 /** What `/delta setup` answers a session with no interactive surface: it can never ask. */
 export const HEADLESS_REFUSAL =
@@ -262,7 +273,7 @@ function matchOrganization(answer: string, organizations: readonly Organization[
 
 /** Describe a repository's current policy for the wizard's first question. */
 function currentPolicy(policy: PolicyFile['policy'], organizations: readonly Organization[]): string {
-  if (!policy.configured) return 'Delta isn\'t set up for this repository yet.'
+  if (!policy.configured) return "Delta isn't set up for this repository yet."
   if (policy.mode === 'manual') return 'Currently: Manual (only sessions you share with /delta-share).'
   // A person knows an organization by its name; the id is shown only for one this account can't see.
   const where = organizations.find((org) => org.id === policy.organization)?.name ?? policy.organization
@@ -276,8 +287,8 @@ function currentPolicy(policy: PolicyFile['policy'], organizations: readonly Org
 export async function runSetupWizard(env: SetupEnv, interaction: Interaction): Promise<SetupOutcome> {
   try { return await askAndWrite(env, interaction) }
   catch (error) {
-    if (error instanceof InteractionUnavailable) return { status: 'unavailable', text: UNAVAILABLE_NOTICE }
-    if (error instanceof InteractionDismissed) return CANCELLED
+    if (error instanceof InteractionUnavailableError) return { status: 'unavailable', text: UNAVAILABLE_NOTICE }
+    if (error instanceof InteractionDismissedError) return CANCELLED
     throw error
   }
 }
@@ -285,14 +296,14 @@ export async function runSetupWizard(env: SetupEnv, interaction: Interaction): P
 async function askAndWrite(env: SetupEnv, interaction: Interaction): Promise<SetupOutcome> {
   let root: string
   try { root = await env.checkoutRoot() }
-  catch (error) { return { status: 'no-checkout', text: `/delta-setup needs a Git checkout: ${String(error)}` } }
+  catch (error) { return { status: 'no-checkout', text: `/delta-setup needs a Git checkout: ${errorText(error)}` } }
   // Nothing below can work in a repository Delta can't identify, so that is said before any question.
   const unidentified = remoteRefusal(await env.remotes(), '/delta-setup')
   if (unidentified) return { status: 'failed', text: `${unidentified}.` }
   const path = policyPath(root)
   let file: PolicyFile
   try { file = readProjectPolicy(await env.readFile(path)) }
-  catch (error) { return { status: 'failed', text: `/delta-setup could not read ${path}: ${String(error)}` } }
+  catch (error) { return { status: 'failed', text: `/delta-setup could not read ${path}: ${errorText(error)}` } }
 
   if (file.malformed) {
     await interaction.log(`Delta could not read ${path}: ${file.policy.problem}. Its contents were left untouched.`, 'transcript')
@@ -302,17 +313,17 @@ async function askAndWrite(env: SetupEnv, interaction: Interaction): Promise<Set
   // A Delta this plugin cannot record against would make every choice below fail later.
   let contract: ThreadContract | undefined
   try { contract = await env.contract() }
-  catch (error) { return { status: 'failed', text: `/delta-setup could not prepare Delta: ${String(error)}` } }
+  catch (error) { return { status: 'failed', text: `/delta-setup could not prepare Delta: ${errorText(error)}` } }
   const refusal = contractRefusal(contract)
   if (refusal) return { status: 'failed', text: `/delta-setup: ${refusal}, then run /delta-setup again.` }
   try { await env.authenticate((text) => interaction.log(text, 'transcript')) }
   catch (error) {
-    return { status: 'failed', text: error instanceof AccessRequiredError ? error.message : `/delta-setup could not sign in to Delta: ${String(error)}` }
+    return { status: 'failed', text: error instanceof AccessRequiredError ? error.message : `/delta-setup could not sign in to Delta: ${errorText(error)}` }
   }
 
   let organizations: Organization[]
   try { organizations = await env.organizations() }
-  catch (error) { return { status: 'failed', text: `/delta-setup could not list your Delta teams: ${String(error)}` } }
+  catch (error) { return { status: 'failed', text: `/delta-setup could not list your Delta teams: ${errorText(error)}` } }
   // A policy that records to an organization this account isn't in records nothing for it; say so
   // before asking, so the person can see why.
   if (recordsAutomatically(file.policy) && file.policy.organization && organizations.length &&
@@ -359,7 +370,7 @@ async function askAndWrite(env: SetupEnv, interaction: Interaction): Promise<Set
   const labels = modeLabels(team, isPersonalOrganization(team, login))
   const answer = await interaction.ask(
     `${currentPolicy(file.policy, organizations)} When Delta syncs a Claude Code session, it stores the conversation and ` +
-    'a copy of this checkout\'s code, including uncommitted changes, in DeltaDB. This applies to new ' +
+    "a copy of this checkout's code, including uncommitted changes, in DeltaDB. This applies to new " +
     'sessions, not this one. Which sessions should Delta sync?',
     { options: labels.map(([, label]) => label), header: HEADER })
   // A typed answer may name a mode by its short name instead of choosing its label.
@@ -371,7 +382,7 @@ async function askAndWrite(env: SetupEnv, interaction: Interaction): Promise<Set
   const text = serializeProjectPolicy(file.document, mode, team.id)
   // Choosing a mode is the decision; saving it needs no second confirmation, and the answer says what was saved.
   try { await env.writeFile(path, text) }
-  catch (error) { return { status: 'failed', text: `Delta could not save ${path}: ${String(error)}` } }
+  catch (error) { return { status: 'failed', text: `Delta could not save ${path}: ${errorText(error)}` } }
   // The setting is personal, so it stays out of commits, as the Delta app keeps its own `.delta/`
   // files out. A file that is already committed keeps being tracked; excluding it changes nothing.
   if (!await excludeFromGit(env, EXCLUDE_ENTRY))
@@ -391,7 +402,7 @@ async function askAndWrite(env: SetupEnv, interaction: Interaction): Promise<Set
       : `Your new setting starts with your next session. Sync this session to ${team.name} too?`,
     { options: ['Sync it', 'Not now'], header: HEADER })
   }
-  catch (error) { if (!(error instanceof InteractionDismissed || error instanceof InteractionUnavailable)) throw error }
+  catch (error) { if (!(error instanceof InteractionDismissedError || error instanceof InteractionUnavailableError)) throw error }
   if (share !== 'Sync it') return { status: 'wrote', text: notSyncing }
   return {
     status: 'wrote',
@@ -405,7 +416,9 @@ async function askAndWrite(env: SetupEnv, interaction: Interaction): Promise<Set
  * Ask for a new team's typed name, then create it and offer invitations: `declined` to go back to the
  * team question, undefined for an answer that is not a name, or setup's outcome when it ends here.
  */
-async function offerNewOrganization(env: SetupEnv, interaction: Interaction): Promise<Organization | SetupOutcome | 'declined' | undefined> {
+async function offerNewOrganization(
+  env: SetupEnv, interaction: Interaction,
+): Promise<Organization | SetupOutcome | 'declined' | undefined> {
   const back = 'Back to the list'
   const answer = await interaction.ask(TEAM_NAME_QUESTION, { options: [back, 'Cancel'], header: HEADER })
   if (answer === back) return 'declined'
@@ -424,7 +437,9 @@ function teamName(answer: string): string | undefined {
  * existing team doesn't silently create another. Undefined for a name several organizations share,
  * or an answer that is not a name, so the team question asks again.
  */
-async function confirmNewTeam(env: SetupEnv, interaction: Interaction, answer: string, organizations: readonly Organization[]): Promise<Organization | SetupOutcome | 'declined' | undefined> {
+async function confirmNewTeam(
+  env: SetupEnv, interaction: Interaction, answer: string, organizations: readonly Organization[],
+): Promise<Organization | SetupOutcome | 'declined' | undefined> {
   const name = teamName(answer)
   if (!name || organizations.some((org) => org.name.toLowerCase() === name.toLowerCase())) return undefined
   const create = 'Create it'
@@ -442,7 +457,7 @@ async function createTeam(env: SetupEnv, interaction: Interaction, answer: strin
   if (!name) return undefined
   let created: Organization
   try { created = await env.createOrganization(name) }
-  catch (error) { return { status: 'failed', text: `/delta-setup couldn't create the team "${name}": ${String(error)}. Check /delta-org list before trying again; it may have been created.` } }
+  catch (error) { return { status: 'failed', text: `/delta-setup couldn't create the team "${name}": ${errorText(error)}. Check /delta-org list before trying again; it may have been created.` } }
   await interaction.log(`Created the team "${created.name}".`, 'transcript')
   await offerInvites(env, interaction, created)
   return created
@@ -464,7 +479,7 @@ async function offerInvites(env: SetupEnv, interaction: Interaction, organizatio
         descriptions: { [later]: 'Invite anytime with /delta-org invite' },
       })
   } catch (error) {
-    if (error instanceof InteractionDismissed) return
+    if (error instanceof InteractionDismissedError) return
     throw error
   }
   if (answer === later) {
@@ -483,7 +498,7 @@ async function offerInvites(env: SetupEnv, interaction: Interaction, organizatio
   let results: InviteResult[]
   try { results = await env.inviteMembers(organization.id, emails) }
   catch (error) {
-    await interaction.log(`Couldn't send the invitations: ${String(error)}. Use /delta-org invite <email> to try again.`, 'transcript')
+    await interaction.log(`Couldn't send the invitations: ${errorText(error)}. Use /delta-org invite <email> to try again.`, 'transcript')
     return
   }
   await interaction.log(`${invitationSummary(results, organization.name)} Manage members: ${membersUrl(organization.id)}`, 'transcript')
@@ -549,10 +564,10 @@ export async function releaseOnboarding(store: OnboardingStore, key: string): Pr
 
 export const ONBOARDING_QUESTION =
   'The Delta plugin is installed, but nothing in this repository syncs until you set it up. ' +
-  'You\'ll configure your team and which sessions to sync. Set it up now?'
+  "You'll configure your team and which sessions to sync. Set it up now?"
 /** What declining the onboarding offer leaves in the transcript, since the offer does not return. */
 export const ONBOARDING_DECLINED =
-  'Delta isn\'t set up here, so nothing syncs. Run /delta-setup to set it up, or /delta-share to sync and share just this session.'
+  "Delta isn't set up here, so nothing syncs. Run /delta-setup to set it up, or /delta-share to sync and share just this session."
 /** The onboarding offer's answer that opens setup. */
 const SET_UP_NOW = 'Set up now'
 
@@ -563,7 +578,7 @@ async function askOnboarding(env: SetupEnv, interaction: Interaction): Promise<'
     answer = await interaction.ask(ONBOARDING_QUESTION, { options: [SET_UP_NOW, 'Not now'], header: HEADER })
   }
   catch (error) {
-    return error instanceof InteractionUnavailable ? 'unavailable' : 'unfinished'
+    return error instanceof InteractionUnavailableError ? 'unavailable' : 'unfinished'
   }
   // Only "Not now" declines. Anything typed instead, such as a slash command entered while the dialog
   // was open, decides nothing, so the offer comes back.
@@ -579,7 +594,7 @@ async function askOnboarding(env: SetupEnv, interaction: Interaction): Promise<'
     if (outcome.status === 'cancelled') return 'unfinished'
     wrote = outcome.status === 'wrote'
     text = outcome.text
-  } catch (error) { text = `/delta-setup failed: ${String(error)}` }
+  } catch (error) { text = `/delta-setup failed: ${errorText(error)}` }
   await interaction.log(text, 'transcript')
   return wrote ? 'settled' : 'unfinished'
 }

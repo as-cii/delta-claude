@@ -1,5 +1,8 @@
-import { describe, expect, test as kitTest, tier, type Engine } from 'claude-code/testing'
-import { CHECKOUT, CONFIG, FOLDERS, LIVE, MOUNTS, abovePrompt, bash, fakeThreads, prompt, remoteItem, sessionEnd, sessionStart, shareCommand, testsWithHeldClockWait, turnComplete, turnStart } from './fake-thread-commands'
+import { describe, type Engine, expect, test as kitTest, tier } from 'claude-code/testing'
+import {
+  abovePrompt, bash, CHECKOUT, CONFIG, drawBandText, fakeThreads, FOLDERS, LIVE, MOUNTS, prompt, remoteItem, sessionEnd,
+  sessionStart, shareCommand, testsWithHeldClockWait, turnComplete, turnStart,
+} from './fake-thread-commands'
 import { itemFingerprint } from './conversation'
 import { cliFixture } from './cli-fixtures'
 import { HANDOFF_ACKNOWLEDGEMENT, HANDOFF_EXPIRY_MS, HANDOFF_PROMPT, newSessionLink } from './handoff'
@@ -10,7 +13,6 @@ tier('user')
  * A redraw, which is the hook context the plugin answers its own command in: a remote message's
  * row only reaches Claude when the host draws a site again.
  */
-const redraw = async ($: Engine) => JSON.stringify(await $.ui.render(abovePrompt))
 
 /** Keeps a clock wait held, so stepping the mock clock does not wait out a settle budget. */
 const test = testsWithHeldClockWait(kitTest)
@@ -735,7 +737,7 @@ describe('joining', () => {
     fake.server.items.set('fresh', remoteItem('New observer live snapshot', { id: 'fresh' }))
     await $.session.start(sessionStart)
     await fake.clock.settle()
-    await redraw($)
+    await drawBandText($)
     const live = fake.live()!
     // A press handle is new with every draw; the band is otherwise the same.
     const drawnBand = async () => JSON.stringify(await $.ui.render(abovePrompt)).replace(/"handle":\d+/g, '')
@@ -743,10 +745,35 @@ describe('joining', () => {
     expect(band).toContain(LIVE)
     release()
     await fake.clock.settle()
-    await redraw($)
+    await drawBandText($)
     expect(await drawnBand()).toBe(band)
     expect((await $.prompt.submit(prompt('new observer still ready'))).drop).toBeUndefined()
     expect(fake.live()).toBe(live)
+    fake.expectClean()
+  })
+
+  test('a prompt while a dropped watch is torn down is refused, then accepted once it reconnects', async ($, on) => {
+    const fake = sharedThread(on, $)
+    await $.session.start(sessionStart)
+    await $.command.run({ ...shareCommand, args: `join ${link(fake)}` })
+    await finishJoin(fake)
+    await $.prompt.submit(prompt('owned'))
+    await $.turn.start(turnStart('native-running', 'owned'))
+    // Tearing the drop down stops the running turn; holding that stop holds the teardown open.
+    let release!: () => void
+    fake.holdAbort = new Promise<void>((resolve) => { release = resolve })
+    fake.live()!.exit(1)
+    await fake.clock.settle()
+    expect(fake.aborts).toEqual(['native-running'])
+    // Sharing pauses at the drop, as it did before the watch's phases were modelled.
+    expect((await $.prompt.submit(prompt('during teardown'))).drop).toContain('checkout sharing is paused')
+    fake.holdAbort = undefined
+    release()
+    await $.turn.complete(turnComplete('native-running', 'aborted'))
+    await fake.clock.settle()
+    await fake.clock.advance(1000)
+    expect(fake.live()?.ready).toBe(true)
+    expect((await $.prompt.submit(prompt('after reconnect'))).drop).toBeUndefined()
     fake.expectClean()
   })
 

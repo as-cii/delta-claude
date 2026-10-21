@@ -43,6 +43,15 @@ jobs:
           claude plugin validate .claude-plugin/plugin.json
       - name: Run plugin tests
         run: claude plugin test .
+      - name: Write the engine's type declarations
+        # Loading a watched plugin folder makes Claude Code write .claude-plugin/types/ and a
+        # tsconfig.json for this version. No credentials are needed: the run exits at sign-in,
+        # after the plugin has loaded.
+        run: |
+          CLAUDE_CODE_PLUGIN_DIR_WATCH=1 claude -p --plugin-dir . "Load the plugin." || true
+          head -n 1 .claude-plugin/types/claude-code/index.d.ts
+      - name: Type-check
+        run: npx --yes --package typescript@7.0.2 tsc -p . --verbatimModuleSyntax
       - name: Check CLI setup
         run: python3 scripts/check-cli-setup.py
 

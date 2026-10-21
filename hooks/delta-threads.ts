@@ -9,7 +9,7 @@ import type { WatchChild, WatchItem } from './thread-commands'
 /** How much of a thread's history a subagent is handed when Claude runs it: about 25k tokens. */
 export const HISTORY_BUDGET = 100_000
 /** How much of a Delta turn the parent is told about. */
-export const REPORT_BUDGET = 12_000
+const REPORT_BUDGET = 12_000
 
 /** A thread Claude can message: one in the session's tree, or one a link names. */
 export type ThreadTarget = { reference: string; name: string; thread_id?: string }

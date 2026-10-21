@@ -1,8 +1,10 @@
 import { describe, expect, test, tier } from 'claude-code/testing'
 import {
-  DISPLAY_LIMIT, LEDGER_SAVE_INTERVAL, MARKDOWN_LIMIT, OMITTED, RemoteView, SNAPSHOT_TAIL, earlierItemsNotice, omittedItemsRow, addRows, middleTruncate, conversationText, conversationWebLink, isMessageItem, itemAuthor, itemDisplay,
-  isDrawnItem, itemFingerprint, itemMarkdown, personParagraphs, removedItemRow, renderItem, type Ledger, type PendingRow, type RowSink,
-  commentAction, commentDisplay, commentFingerprint, commentKey, commentQuote, renderComment, type QuotedLine,
+  addRows, commentAction, commentDisplay, commentFingerprint, commentKey, commentQuote, conversationText,
+  conversationWebLink, DISPLAY_LIMIT, earlierItemsNotice, isDrawnItem, isMessageItem, itemAuthor, itemDisplay,
+  itemFingerprint, itemMarkdown, type Ledger, LEDGER_SAVE_INTERVAL, MARKDOWN_LIMIT, middleTruncate, OMITTED,
+  omittedItemsRow, type PendingRow, personParagraphs, type QuotedLine, RemoteView, removedItemRow, renderComment,
+  renderItem, type RowSink, SNAPSHOT_TAIL,
 } from './conversation'
 import type { WatchComment, WatchCommentTarget, WatchItem } from './thread-commands'
 
@@ -181,7 +183,7 @@ describe('conversation', () => {
     expect(emoji).not.toMatch(/^[\uDC00-\uDFFF]|[\uD800-\uDBFF]…|…[\uDC00-\uDFFF]|[\uD800-\uDBFF]$/)
   })
 
-  test('an item keeps its own markdown for a Markdown element, bounded at the element\'s limit', () => {
+  test("an item keeps its own markdown for a Markdown element, bounded at the element's limit", () => {
     expect(itemMarkdown(item('# Title\n\n**bold** and `code`'), 'thread')).toBe('# Title\n\n**bold** and `code`')
     const long = itemMarkdown(item('m'.repeat(MARKDOWN_LIMIT + 5_000)), 'thread-9')
     expect(long.length).toBeLessThanOrEqual(MARKDOWN_LIMIT)
@@ -300,7 +302,7 @@ describe('remote view', () => {
     }
   })
 
-  test('a message and a tool call are drawn as the plugin\'s own command output, never announced', async () => {
+  test("a message and a tool call are drawn as the plugin's own command output, never announced", async () => {
     const view = live()
     view.upsert(item('First', { id: 'a' }))
     const message = await view.nextRow()
@@ -348,7 +350,7 @@ describe('comments', () => {
     expect(renderComment(comment('   '), null, 'thread')).toBeUndefined()
   })
 
-  test('a reply carries its chain\'s target and the comment it answers; a routed comment says where it went', () => {
+  test("a reply carries its chain's target and the comment it answers; a routed comment says where it went", () => {
     const quote: WatchCommentTarget = { kind: 'transcript', item_id: 'answer', quote: 'use a <map>' }
     const root = comment('who is you?')
     const reply = renderComment(comment('I meant you.', { id: 'c2', chain: 'c1', after_id: 'c1', target: null,
@@ -373,7 +375,7 @@ describe('comments', () => {
       .toBe('Ada commented on src/main.rs:4–9:\nFirst.\nSecond.')
   })
 
-  test('quoted context is one elided line: the passage in its line, a parent\'s first line, or a file\'s first lines', () => {
+  test("quoted context is one elided line: the passage in its line, a parent's first line, or a file's first lines", () => {
     const answer = item('Hey! What can I help you with?\nAnything else?', { id: 'answer', kind: 'agent_message' })
     const items = new Map([['answer', answer]])
     const on = (quote: string, item_id: string | null = 'answer'): WatchCommentTarget => ({ kind: 'transcript', item_id, quote })
@@ -400,7 +402,7 @@ describe('comments', () => {
       .toEqual(['4 + let one = 1;', '5 + let two = 2;', '…'])
   })
 
-  test('the fingerprint follows what Claude read, not who it resolved to, its message, or its passage\'s item', async () => {
+  test("the fingerprint follows what Claude read, not who it resolved to, its message, or its passage's item", async () => {
     const original = comment('Why?')
     const resolved = { ...original, author: { user_id: 'other', name: 'Ada L.' }, delivered_with: 'moved' }
     expect(await commentFingerprint(resolved, null)).toBe(await commentFingerprint(original, null))
@@ -409,7 +411,7 @@ describe('comments', () => {
     expect(await commentFingerprint({ ...original, text: 'Why not?' }, null)).not.toBe(await commentFingerprint(original, null))
   })
 
-  test('a comment-only send yields only its comments\' rows, each drawn under the comment\'s key', async () => {
+  test("a comment-only send yields only its comments' rows, each drawn under the comment's key", async () => {
     const view = live()
     view.upsert(item('', { id: 'm' }))
     view.upsertComment(comment('Why this?', { delivered_with: 'm' }))
@@ -574,10 +576,10 @@ describe('adding rows', () => {
     expect(view.ledger.items.a).not.toBe(OMITTED)
   })
 
-  test('the person\'s notice says how many undrawn items are not in Claude\'s context either', () => {
-    expect(earlierItemsNotice(3, 'thread')).toContain('3 earlier items are in Claude\'s context but not shown here')
-    expect(earlierItemsNotice(3, 'thread', 2)).toContain('the oldest 2 are not in Claude\'s context either')
-    expect(earlierItemsNotice(1, 'thread', 1)).toContain('1 earlier item is not shown here or in Claude\'s context')
+  test("the person's notice says how many undrawn items are not in Claude's context either", () => {
+    expect(earlierItemsNotice(3, 'thread')).toContain("3 earlier items are in Claude's context but not shown here")
+    expect(earlierItemsNotice(3, 'thread', 2)).toContain("the oldest 2 are not in Claude's context either")
+    expect(earlierItemsNotice(1, 'thread', 1)).toContain("1 earlier item is not shown here or in Claude's context")
   })
 
   test('a large batch saves as it goes, and a stop mid-row still saves the rows added', async () => {
@@ -666,7 +668,10 @@ async function rows(view: RemoteView) {
 }
 
 async function texts(view: RemoteView) {
-  return (await rows(view)).map((row) => row.text)
+  return (await rows(view)).map((row) => {
+    if (typeof row.text !== 'string') throw new Error(`row ${String(row.id)} has no text`)
+    return row.text
+  })
 }
 
 function item(text: string, fields: Partial<WatchItem> = {}): WatchItem {

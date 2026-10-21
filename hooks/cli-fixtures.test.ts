@@ -2,7 +2,7 @@ import { expect, test } from 'claude-code/testing'
 import { cliErrorCodes, cliFixture, cliFixtures, cliWatchFrames } from './cli-fixtures'
 import { cliFixtureData } from './cli-fixture-data'
 import {
-  DeltaCommandError, classifyCommandFailure, commandErrorFromEnvelope, parseAppendReceipt, parseThreadMount,
+  classifyCommandFailure, commandErrorFromEnvelope, DeltaCommandError, parseAppendReceipt, parseThreadMount,
   parseThreadStatus, parseWatchEvent,
 } from './thread-commands'
 
@@ -26,7 +26,7 @@ test('documented status, mount, append receipts, and watch frames parse at the C
 })
 
 test('every published code is decided by its envelope, and pinned retryability agrees', () => {
-  for (const [code, hints] of Object.entries(cliErrorCodes)) {
+  for (const [code, hints] of Object.entries<{ retryable?: boolean; retry_after_ms?: number }>(cliErrorCodes)) {
     const parsed = commandErrorFromEnvelope({ code, message: 'example', ...hints })
     expect(parsed?.code).toBe(code)
     expect(parsed?.hints.retryable).toBe(hints.retryable)

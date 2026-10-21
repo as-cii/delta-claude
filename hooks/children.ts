@@ -4,6 +4,7 @@
  * spawned it, recorded through an outbox of its own exactly as the session's conversation is.
  */
 import type { Update } from './content'
+import { isJsonObject } from './json'
 
 /** One staged record: its outbox files, in order, and the digest that guards them. */
 export type Entry = { sequence: number; files: string[]; digest: string }
@@ -68,7 +69,6 @@ export type ChildBinding = {
   reportedItem?: string
 }
 
-
 /** The kinds of spawn that start an agent this plugin records as a child thread. */
 export type SpawnKind = { fork: boolean; isTeammate?: true; workflow?: unknown }
 
@@ -100,11 +100,8 @@ export function childName(spawn: { name?: string; description: string }): string
  */
 export function sentBy(update: Update, sender: string): Update {
   if (update.sessionUpdate !== 'user_message') return update
-  const metadata = isObject(update._meta) ? update._meta : {}
-  const delta = isObject(metadata.delta) ? metadata.delta : {}
+  const metadata = isJsonObject(update._meta) ? update._meta : {}
+  const delta = isJsonObject(metadata.delta) ? metadata.delta : {}
   return { ...update, _meta: { ...metadata, delta: { ...delta, sender: { external_id: sender } } } }
 }
 
-function isObject(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === 'object' && !Array.isArray(value)
-}

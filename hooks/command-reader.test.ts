@@ -10,7 +10,7 @@ describe('command reader', () => {
     let closed = false
     const result = readCommandStream({
       next: () => pending,
-      return: async (value) => {
+      return: async (value: { code: number | null; signal: string | null }) => {
         closed = true
         finish({ done: true, value })
         return { done: true, value }

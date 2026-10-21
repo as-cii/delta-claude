@@ -1,4 +1,5 @@
 import type { EngineInterface } from 'claude-code'
+import { errorText } from './text'
 
 type Run = EngineInterface['process']['run']
 type WindowsDiscovery = Pick<EngineInterface['fs'], 'exists'>
@@ -68,7 +69,9 @@ export class DeltaCli {
   private executable?: string
   private pending?: Promise<string>
 
-  async resolve(run: Run, allowInstall = false, progress = (_text: string) => {}, windows: WindowsDiscovery | false = false): Promise<string> {
+  async resolve(
+    run: Run, allowInstall = false, progress = (_text: string) => {}, windows: WindowsDiscovery | false = false,
+  ): Promise<string> {
     if (this.executable) return this.executable
     if (this.pending) {
       try { return await this.pending }
@@ -88,7 +91,9 @@ export class DeltaCli {
     }
   }
 
-  private async setup(run: Run, allowInstall: boolean, progress: (text: string) => void, windows: WindowsDiscovery | false): Promise<string> {
+  private async setup(
+    run: Run, allowInstall: boolean, progress: (text: string) => void, windows: WindowsDiscovery | false,
+  ): Promise<string> {
     if (windows) {
       // Restrict lookup to PATH rather than also searching the current checkout.
       const result = await run(['where.exe', '$PATH:delta.exe'], { timeoutMs: 30_000 })
@@ -121,7 +126,7 @@ export class DeltaCli {
     try {
       installed = await run(['sh', '-c', install], { timeoutMs: 600_000 })
     } catch (error) {
-      throw new Error(`Delta installation could not finish: ${String(error)}. Check network access, curl, and disk permissions, then retry /delta-share or /delta-join <link>.`)
+      throw new Error(`Delta installation could not finish: ${errorText(error)}. Check network access, curl, and disk permissions, then retry /delta-share or /delta-join <link>.`)
     }
     if (installed.exitCode !== 0 || installed.isStdoutTruncated || installed.isStderrTruncated)
       throw new Error(`Delta installation failed: ${installed.stderr.trim() || 'installer failed or output was truncated'}. Check network access, curl, and disk permissions, then retry /delta-share or /delta-join <link>.`)

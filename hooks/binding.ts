@@ -1,4 +1,4 @@
-type Execution = { sequence: number; turnId?: string; lost?: true; endSequence?: number }
+export type Execution = { sequence: number; turnId?: string; lost?: true; endSequence?: number }
 type SavedBinding = {
   next: number
   lastTurnSequence?: number

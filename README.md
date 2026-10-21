@@ -118,8 +118,12 @@ Validate the plugin and run its tests:
 claude plugin validate .
 claude plugin validate .claude-plugin/plugin.json
 claude plugin test .
+npx --yes --package typescript@7.0.2 tsc -p . --verbatimModuleSyntax
 python3 scripts/check-cli-setup.py
 ```
+
+The type check reads the declarations Claude Code writes into `.claude-plugin/types/` whenever it loads
+this folder, as `claude --plugin-dir .` below does.
 
 To try your changes, start Claude Code with the plugin loaded from this checkout:
 

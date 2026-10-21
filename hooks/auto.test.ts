@@ -1,7 +1,7 @@
-import { describe, expect, test as kitTest, tier } from 'claude-code/testing'
-import type { Engine } from 'claude-code'
+import { describe, type Engine, expect, test as kitTest, tier } from 'claude-code/testing'
 import {
-  CHECKOUT, abovePrompt, fakeThreads, prompt, sessionEnd, sessionStart, shareCommand, testsWithHeldClockWait, turnComplete, turnStart, typedDelta,
+  abovePrompt, CHECKOUT, drawBandText, fakeThreads, prompt, sessionEnd, sessionStart, shareCommand,
+  testsWithHeldClockWait, turnComplete, turnStart, typedDelta,
 } from './fake-thread-commands'
 import { ONBOARDING_DECLINED, ONBOARDING_QUESTION } from './setup'
 
@@ -13,7 +13,6 @@ const POLICY = '/repo/.delta/settings.json'
 const OFFLINE_STATUS = { operation: 'status', code: 'app_unavailable', message: 'Cannot reach Delta' } as const
 
 /** The status band's drawn tree as text, for asserting what the person sees. */
-const drawn = async ($: Engine) => JSON.stringify(await $.ui.render(abovePrompt))
 /** The band as drawn when Claude gives it only `maxRows` rows. */
 const drawnInRows = async ($: Engine, maxRows: number) =>
   JSON.stringify(await $.ui.render({ ...abovePrompt, props: { ...abovePrompt.props, maxRows } }))
@@ -32,7 +31,7 @@ type ReminderKind = 'manual' | 'not set up' | 'none'
 
 /** The reminder the band shows a session Delta does not sync, by what it tells the person. */
 async function reminderKind($: Engine): Promise<ReminderKind> {
-  const band = await drawn($)
+  const band = await drawBandText($)
   if (band.includes('Not syncing') && band.includes('/delta-share')) return 'manual'
   return band.includes('Not set up') && band.includes('/delta-setup') ? 'not set up' : 'none'
 }
@@ -268,11 +267,11 @@ describe('automatic activation', () => {
     await fake.clock.advance(0)
     await fake.clock.settle()
     expect(await reminderKind($)).toBe('none')
-    expect(await drawn($)).toContain('Syncing')
+    expect(await drawBandText($)).toContain('Syncing')
     await $.session.end(sessionEnd(fake.session))
     await startAuto($, fake, 'resume')
     expect(await reminderKind($)).toBe('none')
-    expect(await drawn($)).toContain('Syncing')
+    expect(await drawBandText($)).toContain('Syncing')
   })
 
   test('a session that ends during attach starts no watcher and gives no share advice', { timeoutMs: 15_000 }, async ($, on) => {
@@ -311,7 +310,7 @@ describe('the band on an automatic session', () => {
     fake.server.registered = true
     await fake.clock.advance(1_000)
     await fake.clock.settle()
-    await drawn($)
+    await drawBandText($)
     await fake.clock.settle()
     const registering = await drawnInRows($, 1)
     expect(registering).toContain('Syncing to DeltaDB…')
@@ -320,15 +319,15 @@ describe('the band on an automatic session', () => {
     fake.server.confirmed = true
     await fake.clock.advance(2_000)
     await fake.clock.settle()
-    await drawn($)
+    await drawBandText($)
     await fake.clock.settle()
-    const finished = await drawn($)
+    const finished = await drawBandText($)
     expect(finished).toContain('Synced to DeltaDB')
     expect(finished).toContain(`https://delta.dev/join/${fake.shareId}`)
     expect(finished).toContain('Shared with Zed')
     await fake.clock.advance(5_000)
     await fake.clock.settle()
-    const band = await drawn($)
+    const band = await drawBandText($)
     expect(band).toContain(`https://delta.dev/join/${fake.shareId}`)
     expect(band).not.toContain('Synced to DeltaDB')
     // Organization mode reaches the organization through the upload, never through `thread share`.
@@ -345,9 +344,9 @@ describe('the band on an automatic session', () => {
       fake.server.registered = true
       fake.server.confirmed = true
       await startAuto($, fake)
-      await drawn($)
+      await drawBandText($)
       await fake.clock.settle()
-      const band = await drawn($)
+      const band = await drawBandText($)
       expect(band).toContain("Synced with tester's Organization")
       expect(band).not.toContain('Shared with')
       // A wide band has room for every control, so a share control would be drawn if offered.
@@ -365,9 +364,9 @@ describe('the band on an automatic session', () => {
     await startAuto($, fake)
     await fake.clock.advance(1_000)
     await fake.clock.settle()
-    await drawn($)
+    await drawBandText($)
     await fake.clock.settle()
-    const band = await drawn($)
+    const band = await drawBandText($)
     expect(band).toContain('Sync failed: storage quota exceeded')
     expect(band).toContain(`https://delta.dev/join/${fake.shareId}`)
     expect(band).not.toContain('Synced to DeltaDB')
@@ -385,7 +384,7 @@ describe('the band on an automatic session', () => {
     expect(fake.live()?.ready).toBe(false)
     await fake.clock.advance(2_000)
     await fake.clock.settle()
-    expect(await drawn($)).toContain(`https://delta.dev/join/${fake.shareId}`)
+    expect(await drawBandText($)).toContain(`https://delta.dev/join/${fake.shareId}`)
     fake.expectClean()
   })
 
@@ -401,12 +400,12 @@ describe('the band on an automatic session', () => {
     await startAuto($, fake)
     const thread = fake.server.thread
     // The first draw reads the organization directory; the next one names it.
-    await drawn($)
+    await drawBandText($)
     await fake.clock.settle()
-    expect(await drawn($)).toContain('Synced with Personal')
+    expect(await drawBandText($)).toContain('Synced with Personal')
     await fake.clock.settle()
     const terminal = await $.ui.mount({ plugin: 'delta', surface: 'terminal', component: 'AbovePrompt', props: { ...abovePrompt.props } })
-    await terminal.find({ type: 'Button', label: 'Share with Personal' })
+    expect(await terminal.find({ type: 'Button', text: 'Share with Personal' })).toBeDefined()
     await terminal.press({ key: 'share' })
     await fake.clock.settle()
     await fake.clock.advance(0)
@@ -430,11 +429,13 @@ describe('the band on an automatic session', () => {
     await $.turn.start(turnStart('busy', 'working'))
     await fake.clock.settle()
     const terminal = await $.ui.mount({ plugin: 'delta', surface: 'terminal', component: 'AbovePrompt', props: { ...abovePrompt.props } })
-    await terminal.find({ type: 'Button', label: 'Share after this turn' })
+    expect(await terminal.find({ type: 'Button', text: 'Share after this turn' })).toBeDefined()
     await terminal.press({ key: 'share' })
     await fake.clock.settle()
     expect(fake.operations()).not.toContain('share')
-    await terminal.find({ type: 'Button', label: 'Sharing after this turn' })
+    // A mounted drawing is not redrawn after its press; a fresh one shows the queued share.
+    const queued = await $.ui.mount({ plugin: 'delta', surface: 'terminal', component: 'AbovePrompt', props: { ...abovePrompt.props } })
+    expect(await queued.find({ type: 'Button', text: 'Sharing after this turn' })).toBeDefined()
     await $.turn.complete(turnComplete('busy'))
     await fake.clock.settle()
     await fake.clock.advance(0)
@@ -524,10 +525,10 @@ describe('offline recording', () => {
     // The records stay queued and Claude keeps working: the pause stops delivery, not the turn.
     expect(binding(fake).pending.length).toBeGreaterThan(0)
     expect(fake.aborts).toEqual([])
-    expect(await drawn($)).toContain("Delta couldn't publish this thread's offline changes.")
+    expect(await drawBandText($)).toContain("Delta couldn't publish this thread's offline changes.")
     const terminal = await $.ui.mount({ plugin: 'delta', surface: 'terminal', component: 'AbovePrompt', props: { ...abovePrompt.props } })
-    await terminal.find({ type: 'Button', label: 'Fork & Restore' })
-    await terminal.find({ type: 'Button', label: 'Discard' })
+    expect(await terminal.find({ type: 'Button', text: 'Fork & Restore' })).toBeDefined()
+    expect(await terminal.find({ type: 'Button', text: 'Discard' })).toBeDefined()
     // A further prompt is accepted and its records stay queued, not lost.
     expect((await $.prompt.submit(prompt('still here'))).drop).toBeUndefined()
     await fake.clock.settle()
@@ -538,7 +539,7 @@ describe('offline recording', () => {
     await $.turn.start(turnStart('native-resolved', 'resolved elsewhere'))
     await fake.clock.settle()
     expect(binding(fake).pending).toEqual([])
-    expect(await drawn($)).not.toContain('Fork & Restore')
+    expect(await drawBandText($)).not.toContain('Fork & Restore')
     fake.expectClean()
   })
 
@@ -552,7 +553,7 @@ describe('offline recording', () => {
     await fake.clock.settle()
     expect(binding(fake).pending.length).toBeGreaterThan(0)
     const terminal = await $.ui.mount({ plugin: 'delta', surface: 'terminal', component: 'AbovePrompt', props: { ...abovePrompt.props } })
-    await terminal.find({ type: 'Button', label: 'Fork & Restore' })
+    expect(await terminal.find({ type: 'Button', text: 'Fork & Restore' })).toBeDefined()
     await terminal.press({ key: 'fork' })
     await fake.clock.settle()
     await fake.clock.advance(0)
@@ -560,7 +561,7 @@ describe('offline recording', () => {
     expect(fake.operations()).toEqual(expect.arrayContaining(['fork', 'discard']))
     expect(binding(fake).pending).toEqual([])
     expect(fake.logs.filter((log) => log.includes('thread-fork-1'))).toHaveLength(1)
-    expect(await drawn($)).not.toContain('Fork & Restore')
+    expect(await drawBandText($)).not.toContain('Fork & Restore')
     fake.expectClean()
   })
 
@@ -575,14 +576,14 @@ describe('offline recording', () => {
     const terminal = await $.ui.mount({ plugin: 'delta', surface: 'terminal', component: 'AbovePrompt', props: { ...abovePrompt.props } })
     // The discard fails after the fork, so the refusal stays and the person may try again.
     fake.commandFault = { operation: 'discard', code: 'failed', message: 'discard failed', retryable: false }
-    await terminal.find({ type: 'Button', label: 'Fork & Restore' })
+    expect(await terminal.find({ type: 'Button', text: 'Fork & Restore' })).toBeDefined()
     await terminal.press({ key: 'fork' })
     await fake.clock.settle()
     await fake.clock.advance(0)
     await fake.clock.settle()
     expect(fake.operations()).toEqual(expect.arrayContaining(['fork', 'discard']))
     expect(binding(fake).pending.length).toBeGreaterThan(0)
-    expect(await drawn($)).toContain('Fork & Restore')
+    expect(await drawBandText($)).toContain('Fork & Restore')
     fake.expectClean()
   })
 
@@ -596,14 +597,14 @@ describe('offline recording', () => {
     await fake.clock.settle()
     expect(binding(fake).pending.length).toBeGreaterThan(0)
     const terminal = await $.ui.mount({ plugin: 'delta', surface: 'terminal', component: 'AbovePrompt', props: { ...abovePrompt.props } })
-    await terminal.find({ type: 'Button', label: 'Discard' })
+    expect(await terminal.find({ type: 'Button', text: 'Discard' })).toBeDefined()
     await terminal.press({ key: 'discard' })
     await fake.clock.settle()
     await fake.clock.advance(0)
     await fake.clock.settle()
     expect(fake.operations()).toContain('discard')
     expect(binding(fake).pending).toEqual([])
-    expect(await drawn($)).not.toContain('Discard')
+    expect(await drawBandText($)).not.toContain('Discard')
     fake.expectClean()
   })
 
@@ -668,7 +669,7 @@ describe('offline recording', () => {
     // The membership check runs before staging, so nothing is created or queued.
     expect(fake.operations()).not.toContain('create')
     expect(binding(fake)).toBeUndefined()
-    expect(await drawn($)).toContain("isn't in this repo's team")
+    expect(await drawBandText($)).toContain("isn't in this repo's team")
     expect(explained()).toBe(1)
     expect((await $.prompt.submit(prompt('one'))).drop).toBeUndefined()
     await fake.clock.settle()
@@ -677,7 +678,7 @@ describe('offline recording', () => {
 
     // The next new session in the repository keeps the band line without repeating the explanation.
     await startAuto($, fake, 'clear')
-    expect(await drawn($)).toContain("isn't in this repo's team")
+    expect(await drawBandText($)).toContain("isn't in this repo's team")
     expect(explained()).toBe(1)
     fake.expectClean()
   })
@@ -701,7 +702,7 @@ describe('offline recording', () => {
     await fake.clock.settle()
     expect(binding(fake)).toBeUndefined()
     expect(queued.filter((path: string) => fake.files.has(path))).toEqual([])
-    expect(await drawn($)).toContain("isn't in this repo's team")
+    expect(await drawBandText($)).toContain("isn't in this repo's team")
     // Nothing retries: the next prompt is accepted without another create or a new queue.
     expect((await $.prompt.submit(prompt('after'))).drop).toBeUndefined()
     await fake.clock.settle()
@@ -876,9 +877,9 @@ describe('setup dialogs and notices', () => {
     await fake.share($)
     expect(fake.commands.find((argv) => argv.includes('create'))).toEqual(expect.arrayContaining(['--organization', 'org-2', '--visibility', 'private']))
     expect(fake.server.shared).toBe(true)
-    await drawn($)
+    await drawBandText($)
     await fake.clock.settle()
-    expect(await drawn($)).toContain('Shared with Acme')
+    expect(await drawBandText($)).toContain('Shared with Acme')
     fake.expectClean()
   })
 
@@ -926,7 +927,7 @@ describe('setup dialogs and notices', () => {
     expect(fake.exports).toBe(0)
     expect(fake.server.thread).toBeUndefined()
     // The band drops the share's progress rather than reporting a failure.
-    expect(await drawn($)).not.toContain('Preparing to share')
+    expect(await drawBandText($)).not.toContain('Preparing to share')
     expect(fake.logs.join('\n')).not.toContain('Delta sharing failed')
     fake.expectClean()
   })

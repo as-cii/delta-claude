@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'claude-code/testing'
 import { cliFixture } from './cli-fixtures'
-import { chooseShareAudience, threadInvitationsFrom, type AudienceChoices } from './share-audience'
+import { type AudienceChoices, chooseShareAudience, threadInvitationsFrom } from './share-audience'
 import type { Interaction } from './setup'
 
 /** Answer the share question with `answer`, recording the options it offered. */
@@ -26,10 +26,10 @@ describe('share audience', () => {
       // A synced session can widen its audience or keep it, never become private again.
       { choices: { team: 'Zed', synced: true }, answer: 'Keep current sharing', result: { kind: 'unchanged' }, offered: [team, 'Keep current sharing'] },
       // A personal organization has no team, so "just me" is paired with Cancel.
-      { choices: { synced: false }, answer: 'Cancel', result: '', offered: [justMe, 'Cancel'] },
+      { choices: { synced: false }, answer: 'Cancel', result: { kind: 'none', reason: '' }, offered: [justMe, 'Cancel'] },
       { choices: { team: 'Zed', synced: false }, answer: 'ada@example.com, bo@example.com',
         result: { kind: 'invite', emails: ['ada@example.com', 'bo@example.com'] }, offered: [team, justMe] },
-      { choices: { team: 'Zed', synced: false }, answer: 'ada', result: expect.stringContaining('No email addresses'), offered: [team, justMe] },
+      { choices: { team: 'Zed', synced: false }, answer: 'ada', result: { kind: 'none', reason: expect.stringContaining('No email addresses') }, offered: [team, justMe] },
     ]
     for (const { choices, answer, result, offered } of cases)
       expect(await ask(choices, answer)).toEqual({ result, offered: [offered] })

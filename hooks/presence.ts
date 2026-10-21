@@ -1,5 +1,5 @@
 import { conversationText } from './conversation'
-import { personKey, type Person } from './status'
+import { type Person, personKey } from './status'
 import type { ThreadUser } from './thread-commands'
 
 type Timer = { cancel(): void }

@@ -16,7 +16,7 @@ test('snapshot formats separate and combined bash rows without changing assistan
       { role: 'user', content: [{ type: 'text', text: 'Ran `ls`' }, { type: 'text', text: '```\nApplications\n```' }] },
       assistant,
     ])
-  expect(input.content[0].text).toBe('<bash-input>ls</bash-input>')
+  expect(input.content[0]?.text).toBe('<bash-input>ls</bash-input>')
 })
 
 test('snapshot export keeps the last 4096 messages in order without changing them', () => {
@@ -51,7 +51,7 @@ test('snapshot drops whole engine framing blocks and Delta context, not literal 
   const assistant = { role: 'assistant' as const, content: framing }
   expect(snapshotMessages([
     { role: 'user', content: framing },
-    { role: 'user', content: [framing[0], ...kept, framing[1]] },
+    { role: 'user', content: [framing[0]!, ...kept, framing[1]!] },
     assistant,
   ])).toEqual([{ role: 'user', content: kept }, assistant])
 })

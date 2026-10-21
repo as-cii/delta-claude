@@ -1,6 +1,9 @@
-import { describe, expect, test as kitTest, tier, type Engine } from 'claude-code/testing'
+import { describe, type Engine, expect, test as kitTest, tier } from 'claude-code/testing'
 import type { On } from 'claude-code'
-import { CHECKOUT, MOUNTS, childActor, fakeThreads, prompt, remoteItem, sessionStart, testsWithHeldClockWait, turnComplete, turnStart } from './fake-thread-commands'
+import {
+  CHECKOUT, childActor, fakeThreads, MOUNTS, prompt, remoteItem, sessionEnd, sessionStart, testsWithHeldClockWait,
+  turnComplete, turnStart, userText,
+} from './fake-thread-commands'
 
 tier('user')
 
@@ -121,7 +124,7 @@ describe('subagents', () => {
     fake.expectClean()
   })
 
-  test('an isolated subagent works in a fork of its parent\'s worktrees in Delta, released when Claude removes it', async ($, on) => {
+  test("an isolated subagent works in a fork of its parent's worktrees in Delta, released when Claude removes it", async ($, on) => {
     const fake = await sharedSession($, on)
     await mainTurn($, 'main')
     // Claude asks for the subagent's isolated worktree while its spawn is in flight.
@@ -219,7 +222,7 @@ describe('subagents', () => {
   })
 
   test('sharing records the subagents that already ran, and a running one once its run ends', async ($, on) => {
-    const fake = fakeThreads(on, { messages: [text('delegate')] })
+    const fake = fakeThreads(on, { messages: [userText('delegate')] })
     await $.session.start(sessionStart)
     fake.agents = [
       { id: 'earlier', description: 'Read the docs', type: 'general-purpose', status: 'completed' },
@@ -241,11 +244,11 @@ describe('subagents', () => {
       input: { description: 'Rename the lexer', subagent_type: 'general-purpose', isolation: 'worktree' },
       result: { status: 'completed', agentId: 'kept', worktreePath: `${CHECKOUT}/.claude/worktrees/agent-kept` },
     }] }]
-    fake.agentMessages.set('kept', [text('Rename the lexer'), answer('Renamed')])
-    fake.agentMessages.set('isolated', [text('Fix the lexer'), answer('Lexer fixed')])
-    fake.agentMessages.set('earlier', [text('Read the docs'), answer('Docs read')])
-    fake.agentMessages.set('running', [text('Run the tests'), answer('Tests pass')])
-    fake.agentMessages.set('vanished', [text('Check the lexer'), answer('Lexer is fine')])
+    fake.agentMessages.set('kept', [userText('Rename the lexer'), answer('Renamed')])
+    fake.agentMessages.set('isolated', [userText('Fix the lexer'), answer('Lexer fixed')])
+    fake.agentMessages.set('earlier', [userText('Read the docs'), answer('Docs read')])
+    fake.agentMessages.set('running', [userText('Run the tests'), answer('Tests pass')])
+    fake.agentMessages.set('vanished', [userText('Check the lexer'), answer('Lexer is fine')])
     await fake.share($)
     await fake.clock.settle()
     expect([...fake.server.subagents.keys()].sort()).toEqual(['earlier', 'isolated', 'kept', 'running', 'vanished'])
@@ -274,8 +277,22 @@ describe('subagents', () => {
     fake.expectClean()
   })
 
+  test('a subagent whose spawning agent cannot be read is recorded as sharing its parent checkout', async ($, on) => {
+    const fake = fakeThreads(on, { messages: [userText('delegate')] })
+    await $.session.start(sessionStart)
+    fake.agents = [
+      { id: 'outer', description: 'Plan the fix', type: 'general-purpose', status: 'completed' },
+      { id: 'nested', description: 'Check the parser', type: 'general-purpose', status: 'completed', parentId: 'outer' },
+    ]
+    fake.unreadableAgents.add('outer')
+    await fake.share($)
+    await fake.clock.settle()
+    expect(fake.server.subagents.get('nested')?.sharedWorktrees).toBe(true)
+    fake.expectClean()
+  })
+
   test('a subagent running when sharing starts stops when Delta takes it over, and its own checkout reaches Delta', async ($, on) => {
-    const fake = fakeThreads(on, { messages: [text('delegate')] })
+    const fake = fakeThreads(on, { messages: [userText('delegate')] })
     await $.session.start(sessionStart)
     fake.agents = [{ id: 'apart', description: 'Fix the lexer', type: 'general-purpose', status: 'running' }]
     fake.summaries = [{ role: 'assistant', text: '', toolUses: [{
@@ -283,7 +300,7 @@ describe('subagents', () => {
       input: { description: 'Fix the lexer', subagent_type: 'general-purpose', isolation: 'worktree', run_in_background: true },
       result: { status: 'async_launched', agentId: 'apart', description: 'Fix the lexer' },
     }] }]
-    fake.agentMessages.set('apart', [text('Fix the lexer'), answer('Lexer fixed')])
+    fake.agentMessages.set('apart', [userText('Fix the lexer'), answer('Lexer fixed')])
     await fake.share($)
     await fake.clock.settle()
     expect(fake.server.subagents.get('apart')?.sharedWorktrees).toBe(false)
@@ -368,6 +385,48 @@ describe('Delta threads as subagents', () => {
       .toEqual([['state_update', 'running'], ['user_message', 'Write RELEASE.md'], ['agent_message', 'Wrote RELEASE.md'], ['state_update', 'idle']])
     expect(records[1]!.update?._meta?.delta?.sender).toEqual({ external_id: fake.session })
     expect(fake.entered.at(-1)?.text).toBe('The Delta thread "Release notes" finished its turn. Its reply:\n\nWrote RELEASE.md')
+    fake.expectClean()
+  })
+
+  test('each session is told which threads it can message, even when an earlier session in the process was told the same', async ($, on) => {
+    const fake = await sharedSession($, on)
+    fake.child({ thread_id: 'notes-thread', reference: 'root#s=notes', kind: 'subthread', name: 'Release notes', status: 'inactive' })
+    await fake.clock.settle()
+    expect(notes(fake).filter((note) => note.includes('"Release notes"'))).toHaveLength(1)
+
+    // Another session in this process records the same conversation and is told again.
+    const first = fake.session
+    const binding = fake.store.get(`session:${first}`) as Record<string, unknown>
+    await $.session.end(sessionEnd(first))
+    fake.session = 'second-session'
+    fake.producer = first
+    fake.store.set(`session:${fake.session}`, { ...binding, session: fake.session, producer: first })
+    await $.session.start(sessionStart)
+    await fake.clock.settle()
+    // The second session watches the thread once a prompt needs it.
+    expect((await $.prompt.submit(prompt('continue'))).drop).toBeUndefined()
+    await fake.clock.settle()
+    fake.child({ thread_id: 'notes-thread', reference: 'root#s=notes', kind: 'subthread', name: 'Release notes', status: 'inactive' })
+    await fake.clock.settle()
+    expect(notes(fake).filter((note) => note.includes('"Release notes"'))).toHaveLength(2)
+  })
+
+  test('a message to a thread is not delivered when no subagent starts for it', async ($, on) => {
+    const fake = await sharedSession($, on)
+    fake.server.worktrees = [{ reference: 'worktree-1#t=1', name: 'repo' }]
+    fake.live()!.frame({ type: 'worktrees', worktrees: fake.server.worktrees })
+    await mainTurn($, 'main')
+    await $.turn.complete(turnComplete('main'))
+    fake.server.threads.set('root#s=notes', {
+      thread: 'notes-thread', name: 'Release notes', worktrees: [{ reference: 'worktree-1#t=1', name: 'repo' }],
+      items: [remoteItem('We should ship release notes', { id: 'ask' })],
+    })
+    fake.child({ thread_id: 'notes-thread', reference: 'root#s=notes', kind: 'subthread', name: 'Release notes', status: 'inactive' })
+    await fake.clock.settle()
+    fake.spawnStartsNone = true
+    const sent = await $.session.send({ to: 'Release notes', text: 'Write RELEASE.md' } as never)
+    expect(sent).toEqual({ isDelivered: false, reason: 'Claude started no subagent to run the Delta thread "Release notes".' })
+    expect(fake.server.subagents.size).toBe(0)
     fake.expectClean()
   })
 
@@ -498,11 +557,15 @@ describe('Delta threads as subagents', () => {
 
 /** The rows the plugin added to Claude's context. */
 function notes(fake: ReturnType<typeof fakeThreads>): string[] {
-  return fake.stored.filter((row) => row.origin?.kind === 'plugin').flatMap((row) =>
-    row.content.flatMap((block) => block.type === 'text' ? [block.text] : []))
+  return fake.stored.filter((row) => isPluginOrigin(row.origin)).flatMap((row) =>
+    row.content.flatMap((block) => block.type === 'text' && typeof block.text === 'string' ? [block.text] : []))
 }
 
-const text = (value: string) => ({ role: 'user' as const, content: [{ type: 'text' as const, text: value }] })
+/** Whether a stored row's origin names a plugin. */
+function isPluginOrigin(origin: unknown): boolean {
+  return typeof origin === 'object' && origin !== null && 'kind' in origin && origin.kind === 'plugin'
+}
+
 const answer = (value: string) => ({ role: 'assistant' as const, content: [{ type: 'text' as const, text: value }] })
 
 /** A session shared before the test's subagents run. */

@@ -1,5 +1,8 @@
 import { expect, test } from 'claude-code/testing'
-import { activeBackgroundAgents, hasInteractiveSurface, joinPreflight, missingJoinCommands, promptGate, releasesMounts, worktreeChanges } from './lifecycle'
+import {
+  activeBackgroundAgents, hasInteractiveSurface, joinPreflight, missingJoinCommands, promptGate, releasesMounts,
+  worktreeChanges,
+} from './lifecycle'
 import { cliFixture } from './cli-fixtures'
 import type { MountedThread, ThreadMount, ThreadState } from './thread-commands'
 
