@@ -171,7 +171,7 @@ describe('automatic activation', () => {
     const fake = fakeThreads(on)
     let drawn: any
     // Stands in for Claude Code's dialog: records what it would draw, and answers with its own drawing.
-    on('ui.render', { component: 'AskUserQuestion' }, ($, e) => { drawn = e.props; return { type: 'engine', ref: 'dialog' } as never })
+    on('ui.render', { component: 'AskUserQuestion' }, ($, e) => { drawn = e.props; return { type: 'engine', ref: 0 } })
     fake.organizations = [{ id: 'org-1', name: 'Guild', current: false }, { id: 'org-2', name: 'Zed', current: true }]
     let answer!: (value: unknown) => void
     fake.answerQuestion = () => new Promise((resolve) => { answer = resolve })
