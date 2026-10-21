@@ -1304,10 +1304,10 @@ async function authenticationHost($: Runtime): Promise<AuthenticationHost> {
     spawn: (argv) => $.process.spawn({ argv }),
     ask: (question, options) => claudeInteraction($).ask(question, { options, header: 'Delta' }),
     open: (url) => openInBrowser($, url, windows),
-    waiting: (on) => {
-      if (on) {
-        browserWait = { on, stop }
-        setProgress($, on === 'terms' ? "Waiting for Delta's beta terms…" : 'Waiting for Delta sign-in…', 'active')
+    waiting: (waitingFor) => {
+      if (waitingFor) {
+        browserWait = { on: waitingFor, stop }
+        setProgress($, waitingFor === 'terms' ? "Waiting for Delta's beta terms…" : 'Waiting for Delta sign-in…', 'active')
         progress = feed.progress
         return
       }
