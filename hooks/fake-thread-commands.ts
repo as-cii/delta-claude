@@ -807,6 +807,22 @@ export function fakeThreads(on: On, options: {
   // Unhooked, Claude makes and removes a subagent's isolated git worktree itself.
   on('classic.WorktreeCreate', () => ({}))
   on('classic.WorktreeRemove', () => ({}))
+  async function updateOutput(argv: readonly string[]) {
+    await fake.holdUpdate
+    if (fake.updateFailure === 'old-cli')
+      return { stdout: '', exitCode: 2, stderr: "error: unrecognized subcommand 'update'" }
+    if (fake.updateFailure === 'network' || fake.updateFailure === 'app-running')
+      return { stdout: JSON.stringify({ error: {
+        code: fake.updateFailure === 'network' ? 'network_error' : 'app_running',
+        message: fake.updateFailure === 'network' ? 'Check network access.' : 'Quit Delta and retry.',
+        retryable: true,
+      } }), exitCode: 1, stderr: '' }
+    return { stdout: fake.updateFailure === 'malformed' ? '{}' : JSON.stringify({
+      schema_version: 1, status: argv.includes('--check') || !fake.updateCanInstall ? fake.updateStatus : 'updated',
+      current_version: '1.0.0', latest_version: '1.1.0', channel: 'stable',
+      can_install: fake.updateCanInstall, message: fake.updateMessage,
+    }), exitCode: 0, stderr: '' }
+  }
   on('process.run', async ($, e) => {
     const argv = [...e.argv]
     const output = (stdout: string, exitCode = 0, stderr = '') => {
@@ -828,20 +844,8 @@ export function fakeThreads(on: On, options: {
     if (argv[0] === '/selected/delta' && argv[1] === 'update' &&
         (argv.slice(2).join(' ') === '--check --json' || argv.slice(2).join(' ') === '--json')) {
       fake.installUpdates.push({ argv, timeoutMs: e.init?.timeoutMs, env: e.init?.env })
-      await fake.holdUpdate
-      if (fake.updateFailure === 'old-cli') return output('', 2, "error: unrecognized subcommand 'update'")
-      if (fake.updateFailure === 'network' || fake.updateFailure === 'app-running')
-        return output(JSON.stringify({ error: {
-          code: fake.updateFailure === 'network' ? 'network_error' : 'app_running',
-          message: fake.updateFailure === 'network' ? 'Check network access.' : 'Quit Delta and retry.',
-          retryable: true,
-        } }), 1)
-      if (fake.updateFailure === 'malformed') return output('{}')
-      return output(JSON.stringify({
-        schema_version: 1, status: argv.includes('--check') || !fake.updateCanInstall ? fake.updateStatus : 'updated',
-        current_version: '1.0.0', latest_version: '1.1.0', channel: 'stable',
-        can_install: fake.updateCanInstall, message: fake.updateMessage,
-      }))
+      const result = await updateOutput(argv)
+      return output(result.stdout, result.exitCode, result.stderr)
     }
     const operation = parsed?.positionals[1]
     if (operation) fake.cliIntegrations.push({ operation, integration: e.init?.env?.DELTA_CLI_INTEGRATION,
@@ -1019,6 +1023,18 @@ export function fakeThreads(on: On, options: {
     return deliver(((e as any).init?.stdin ?? '').split('\n').filter((line: string) => line.length), output)
   })
   on('process.spawn', async function* ($, e, next) {
+    if (e.argv[0] === '/selected/delta' && e.argv[1] === 'update') {
+      fake.installUpdates.push({ argv: [...e.argv], env: e.env })
+      yield { stream: 'stderr', text: 'Downloading Delta: ' }
+      yield { stream: 'stderr', text: '25%\nPreparing Delta update...\n' }
+      const result = await Promise.race([updateOutput(e.argv), new Promise<undefined>((resolve) => {
+        next.signal.addEventListener('abort', () => resolve(undefined), { once: true })
+      })])
+      if (!result) return { value: { code: null, signal: 'SIGTERM' } }
+      if (result.stderr) yield { stream: 'stderr', text: result.stderr }
+      if (result.stdout) yield { stream: 'stdout', text: result.stdout }
+      return { value: { code: result.exitCode, signal: null } }
+    }
     if (e.argv[0] === 'tail') {
       // `tail -c +N FILE`: the file from its Nth byte, in pieces, as a transcript read sees it.
       fake.commands.push([...e.argv])

@@ -46,9 +46,15 @@ for (const command of ['delta-update', 'delta'] as const)
   test(`${command} explicitly updates with its telemetry command form`, async ($, on) => {
     const fake = fakeThreads(on)
     await $.session.start(sessionStart)
-    const result = await $.command.run({
+    let release!: () => void
+    fake.holdUpdate = new Promise<void>((resolve) => { release = resolve })
+    const updating = $.command.run({
       ...typedDelta(command === 'delta' ? 'update' : ''), command,
     })
+    await fake.settleUntil(() => fake.logs.includes('Preparing Delta update...'))
+    expect(fake.logs).toContain('Downloading Delta: 25%')
+    release()
+    const result = await updating
     expect(result.text).toContain('Updated Delta to 1.1.0')
     expect(result.text).toContain('Restart Claude Code')
     const updates = fake.installUpdates.filter((entry) => !entry.argv.includes('--check'))
@@ -59,6 +65,21 @@ for (const command of ['delta-update', 'delta'] as const)
     })
     fake.expectClean()
   })
+
+test('a stalled explicit update times out and allows a later retry', async ($, on) => {
+  const fake = fakeThreads(on)
+  await $.session.start(sessionStart)
+  let release!: () => void
+  fake.holdUpdate = new Promise<void>((resolve) => { release = resolve })
+  const updating = $.command.run(typedDelta('update'))
+  await fake.settleUntil(() => fake.logs.includes('Preparing Delta update...'))
+  await fake.clock.advance(600_000)
+  expect((await updating).text).toContain('update timed out')
+  release()
+  fake.holdUpdate = undefined
+  expect((await $.command.run(typedDelta('update'))).text).toContain('Updated Delta to 1.1.0')
+  fake.expectClean()
+})
 
 for (const failure of ['old-cli', 'network', 'app-running', 'malformed'] as const)
   test(`${failure} update failures stay actionable and do not block sharing`, async ($, on) => {

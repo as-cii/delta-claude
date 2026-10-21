@@ -4,6 +4,7 @@ import { commandErrorFromEnvelope } from './thread-commands'
 
 export type UpdateHost = {
   run: EngineInterface['process']['run']
+  spawn: EngineInterface['process']['spawn']
   windows(): Promise<boolean>
   exists(path: string): Promise<boolean>
   after: EngineInterface['clock']['after']
@@ -67,6 +68,7 @@ export class InstallationUpdates {
     this.updating = true
     this.revision++
     try {
+      await host.log('Updating Delta installation…', 'transcript')
       const result = await this.run(host, false, form)
       switch (result.status) {
         case 'updated': return `Updated Delta to ${result.latestVersion}. Restart Claude Code to use the updated installation.`
@@ -85,6 +87,7 @@ export class InstallationUpdates {
   private async run(host: UpdateHost, check: boolean, form?: CommandForm): Promise<UpdateResult> {
     const timeoutMs = check ? 10_000 : 600_000
     let expired = false
+    let stream: ReturnType<UpdateHost['spawn']> | undefined
     let timer: ReturnType<UpdateHost['after']> | undefined
     const deadline = new Promise<never>((_, reject) => {
       timer = host.after(timeoutMs, () => {
@@ -106,7 +109,34 @@ export class InstallationUpdates {
       const cli = new DeltaCli()
       const executable = await cli.resolve(run, false, undefined,
         await host.windows() ? { exists: (path) => host.exists(path) } : false)
-      const output = await run([executable, 'update', ...check ? ['--check'] : [], '--json'])
+      const argv = [executable, 'update', ...check ? ['--check'] : [], '--json']
+      const collect = async () => {
+        if (expired) throw new Error('Delta update deadline expired')
+        stream = host.spawn({ argv, env: { DELTA_CLI_INTEGRATION: 'claude_code',
+          ...form ? { DELTA_CLI_COMMAND_FORM: form } : {} } })
+        let stdout = '', stderr = '', pending = ''
+        while (true) {
+          const piece = await stream.next()
+          if (expired) throw new Error('Delta update deadline expired')
+          if (piece.done) {
+            if (pending.trim()) await host.log(pending.trim(), 'transcript')
+            return { stdout, stderr, exitCode: piece.value.code, isStdoutTruncated: false, isStderrTruncated: false }
+          }
+          if (piece.value.stream === 'stdout') stdout += piece.value.text
+          else {
+            stderr += piece.value.text
+            pending += piece.value.text
+          }
+          if (stdout.length + stderr.length > 1024 * 1024)
+            throw new Error('Delta update output exceeded the transport limit. Check the installation before retrying.')
+          const lines = pending.split(/\r?\n/)
+          pending = lines.pop()!
+          for (const line of lines) {
+            if (line.trim()) await host.log(line.trim(), 'transcript')
+          }
+        }
+      }
+      const output = check ? await run(argv) : await collect()
       if (output.isStdoutTruncated || output.isStderrTruncated)
         throw new Error('Delta update output was truncated. Retry /delta-update.')
       if (output.exitCode !== 0 && /(?:unrecognized|unknown|unexpected|invalid).*(?:subcommand|argument|update|--check|--json)/i.test(output.stderr))
@@ -121,6 +151,9 @@ export class InstallationUpdates {
       return result
     }
     try { return await Promise.race([operation(), deadline]) }
-    finally { timer?.cancel() }
+    finally {
+      timer?.cancel()
+      await stream?.return?.({ code: null, signal: 'SIGTERM' })
+    }
   }
 }

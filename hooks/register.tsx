@@ -5169,6 +5169,7 @@ async function manageOrganization($: Runtime): Promise<string> {
 function installUpdateHost($: Runtime): UpdateHost {
   return {
     run: (argv, init) => $.process.run(argv, init),
+    spawn: (init) => $.process.spawn(init),
     windows: async () => await $.env.get('OS') === 'Windows_NT',
     exists: (path) => $.fs.exists(path),
     after: (milliseconds, callback) => $.clock.after(milliseconds, callback),
