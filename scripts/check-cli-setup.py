@@ -23,7 +23,7 @@ class CliSetup(unittest.TestCase):
         self.env = {**os.environ, "HOME": str(self.home), "PATH": str(self.bin)}
         self.write(self.bin / "uname", '#!/bin/sh\nprintf "Linux\\n"\n')
         self.write(self.bin / "curl", '#!/bin/sh\necho called >> "$HOME/downloads"\nexit 22\n')
-        source = (Path(__file__).resolve().parents[1] / "hooks/cli.ts").read_text()
+        source = (Path(__file__).resolve().parents[1] / "hooks/cli/cli.ts").read_text()
         def shell(name):
             text = re.search(rf"const {name} = `\n(.*?)\n`", source, re.S)[1]
             return text.replace("\\\\", "\\").replace("\\${", "${")

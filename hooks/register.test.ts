@@ -1,15 +1,15 @@
 import type { UiCopyResult } from 'claude-code'
 import { describe, expect, test as kitTest, tier } from 'claude-code/testing'
-import { cliFixture } from './cli-fixtures'
-import { claudeVersionWarning } from './compatibility'
-import { addRows, itemFingerprint, type PendingRow, RemoteView } from './conversation'
+import { cliFixture } from './testing/cli-fixtures'
+import { claudeVersionWarning } from './core/compatibility'
+import { addRows, itemFingerprint, type PendingRow, RemoteView } from './watch/conversation'
 import {
   abovePrompt, ADA, bash, CHECKOUT, commandOutput, CONFIG, drawBandText, drawReady, expectNoSetupCommands,
   expectOfferedItems, expectStagedRecords, fakeThreads, LIVE, localCommandCaveat, PENDING, prompt, remoteComment,
   remoteItem, seedPending, sessionEnd, sessionStart, shareCommand, testsWithHeldClockWait, turnComplete, turnStart,
   typedDelta, userMessage, userText,
-} from './fake-thread-commands'
-import { personColor, personKey } from './status'
+} from './testing/fake-thread-commands'
+import { personColor, personKey } from './band/status'
 
 tier('user')
 

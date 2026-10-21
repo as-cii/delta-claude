@@ -11,7 +11,7 @@ def fixture_module(directory):
     fixtures = {path.stem: json.loads(path.read_text()) if path.suffix == ".json"
                 else [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
                 for path in sorted(directory.iterdir()) if path.suffix in {".json", ".jsonl"}}
-    lines = ["// Generated from hooks/fixtures/cli by scripts/sync-cli-fixtures.",
+    lines = ["// Generated from hooks/testing/fixtures/cli by scripts/sync-cli-fixtures.",
              "export const cliFixtureData: Record<string, any> = {"]
     lines.extend("  " + json.dumps(name) + ": " + json.dumps(value, separators=(",", ":"), ensure_ascii=False) + ","
                  for name, value in fixtures.items())
@@ -23,7 +23,7 @@ def main():
     parser.add_argument("delta_checkout", type=Path)
     args = parser.parse_args()
     source = args.delta_checkout / "crates/delta_ipc/fixtures/cli"
-    destination = Path(__file__).resolve().parent.parent / "hooks/fixtures/cli"
+    destination = Path(__file__).resolve().parent.parent / "hooks/testing/fixtures/cli"
     files = sorted(path for path in source.iterdir() if path.suffix in {".json", ".jsonl"} or path.name == "README.md") if source.is_dir() else []
     if not files:
         parser.error(f"No CLI JSON fixtures in {source}")

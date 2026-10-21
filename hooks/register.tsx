@@ -2,32 +2,32 @@ import type { HookFailure, On } from 'claude-code'
 import {
   activate, beginCaptureDecision, decideCapture, forgetSessionStart, newSessionFor, rememberSessionStart,
   rememberTranscript, reportedStart, startSession,
-} from './activation'
-import { clearProgress, drawBand, forgetBarTheme } from './band'
+} from './setup/activation'
+import { clearProgress, drawBand, forgetBarTheme } from './band/band'
 import {
   DELTA_USAGE, deltaMenu, installationUpdates, installUpdateHost, JOIN_USAGE, ORG_USAGE, registerCommands,
   runDeltaCommand,
-} from './commands'
-import { claudeVersionWarning } from './compatibility'
-import { completeTurn, recordRow, recordToolCall, startTurn } from './delivery'
-import { forgetContract } from './delta-cli'
-import { withQuestionHints } from './interaction'
-import { releaseOnEnd } from './join'
-import { admitPrompt } from './prompt'
-import { showAnswer, shownItemId } from './row-delivery'
-import { drawEcho, drawRow } from './rows'
+} from './setup/commands'
+import { claudeVersionWarning } from './core/compatibility'
+import { completeTurn, recordRow, recordToolCall, startTurn } from './recording/delivery'
+import { forgetContract } from './cli/delta-cli'
+import { withQuestionHints } from './setup/interaction'
+import { releaseOnEnd } from './sharing/join'
+import { admitPrompt } from './recording/prompt'
+import { showAnswer, shownItemId } from './watch/row-delivery'
+import { drawEcho, drawRow } from './watch/rows'
 import {
   activation, cancelRequestsOf, endActivationOf, forgetRuntime, forgetTranscriptPath, markEnded, report, requests,
   resetRuntime, type Runtime, stateFor,
-} from './session-state'
+} from './core/session-state'
 import {
   children, completeChildTurn, createSubagentWorktree, forgetSubagents, recordChildRow, recordChildToolCall,
   recordsChildren, recordSpawn, removeSubagentWorktree, startChildTurn,
-} from './subagents'
-import { errorText } from './text'
-import { forgetThreadNotes, sendToThread } from './thread-runs'
-import { forgetTitleReader, recordTitle } from './title'
-import { stopWatching } from './watch'
+} from './subagents/subagents'
+import { errorText } from './core/text'
+import { forgetThreadNotes, sendToThread } from './subagents/thread-runs'
+import { forgetTitleReader, recordTitle } from './recording/title'
+import { stopWatching } from './watch/watch'
 
 /**
  * Write why a hook failed to the debug log, for its `.catch` handler. Every hook but `prompt.submit`

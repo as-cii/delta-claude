@@ -28,8 +28,10 @@ writes when it loads this folder.
 - `register.tsx` holds the `on(...)` registrations, each with its `.catch`. A handler longer than a few lines is a
   function in its feature's module, typed `e: HookEvent<'tool.call'>, next: HookNext<'tool.call'>`. An event a
   subagent's loop also raises routes on `e.agentId` to `subagents.ts`.
-- New code goes in the module for its feature; each module's header says what it holds
-  (`head -6 hooks/*.ts hooks/*.tsx`). Logic without `$` sits in a module of its own, which tests call directly.
+- Each feature has a folder under `hooks/` (`watch/`, `recording/`, `sharing/`, …) holding its modules and their
+  unit tests; `core/` holds what every feature uses, and `testing/` the test fake. New code goes in the module for
+  its feature; each module's header says what it holds (`head -6 hooks/*/*.ts*`). Logic without `$` sits in a
+  module of its own, which tests call directly.
 - Pass `$` to helpers. The hosts `SetupEnv`, `Interaction`, `AuthenticationHost` and `UpdateHost` exist so tests can
   substitute them; add no others.
 - Export only what another module or a test uses. A module variable others read is an `export let`, with no getter.
@@ -86,7 +88,7 @@ writes when it loads this folder.
 
 ## Tests
 
-- Unit-test pure functions directly, in the file named after their module.
+- Unit-test pure functions directly, in a file named after their module, beside it.
 - Test behaviour with the engine's test kit and `fakeThreads`, in the `describe` for its feature in
   `register.test.ts` or a feature's existing engine test file. Each test file runs in a process of its own that
   warms the plugin up again, so a new engine test file adds CPU that makes CI's timed tests flaky.
@@ -109,5 +111,5 @@ There is no formatter: match the code around you, and keep formatting changes ou
 
 1. Run the checks in `AGENTS.md`. `claude plugin validate .` lists no `gating hook without .catch`.
 2. In a refactor, the hooks `validate` lists and the `$` calls in source
-   (`grep -ohE '\$\.[a-z]+\.[a-zA-Z]+' hooks/*.ts hooks/*.tsx | sort -u`) stay the same.
+   (`grep -rohE --include='*.ts*' '\$\.[a-z]+\.[a-zA-Z]+' hooks | sort -u`) stay the same.
 3. Any change to user-visible text (`$.ui.log`, `{ drop }`, `{ text }`, band strings) is intended.
