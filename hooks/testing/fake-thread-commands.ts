@@ -79,6 +79,17 @@ export const CONFIG = '/sandbox/config'
 /** Where the fake host mounts a joiner's worktrees, and the thread folders that hold links to several. */
 export const MOUNTS = '/mounts'
 export const FOLDERS = '/thread-folders'
+/** The Delta CLI `where.exe` finds when a test sets `OS` to `Windows_NT`. */
+export const WINDOWS_DELTA = 'C:\\Delta\\bin\\delta.exe'
+/** The install helper a Windows `delta update --download-only` leaves for the plugin to run. */
+export const UPDATE_HELPER = 'C:\\Updates\\cli-update-1\\delta-update-helper.exe'
+/** The whole command line that update returns for the helper. */
+export const UPDATE_HELPER_ARGV = [
+  UPDATE_HELPER, '--internal-windows-update-install', 'C:\\Delta\\delta-app.exe', 'C:\\Updates\\cli-update-1', '1.1.0',
+]
+/** What the helper prints once its checks pass and the installer starts. */
+export const UPDATE_HELPER_PROGRESS =
+  'Installing Delta; no sessions will be relaunched. Approve the Windows installer prompt if one appears.'
 
 /** The fixture has one virtual root; Windows hosts qualify its slash-led paths with a drive. */
 function fixturePath(path: string): string {
@@ -490,8 +501,15 @@ export function fakeThreads(hostOn: On, options: {
     updateDiscoveries: 0,
     updateDebug: [] as string[],
     installUpdates: [] as { argv: string[]; timeoutMs?: number; env?: Record<string, string> }[],
-    updateStatus: 'up_to_date' as 'up_to_date' | 'update_available' | 'unsupported' | 'updated' | 'update_started',
-    updateInstallStatus: 'updated' as 'updated' | 'update_started',
+    updateStatus: 'up_to_date' as 'up_to_date' | 'update_available' | 'unsupported' | 'updated' | 'install_ready',
+    updateInstallStatus: 'updated' as 'updated' | 'install_ready',
+    /**
+     * What the Windows install helper does once run: finish, finish needing a restart, finish without saying
+     * whether it needs one, refuse with a typed error, or crash without a word.
+     */
+    helperOutcome: 'installed' as 'installed' | 'restart' | 'unsaid' | 'crash' | { code: string; message: string },
+    holdHelper: undefined as Promise<void> | undefined,
+    helperStopped: false,
     updateCanInstall: true,
     updateMessage: 'Update test',
     updateFailure: undefined as undefined | 'old-cli' | 'network' | 'app-running' | 'malformed',
@@ -943,10 +961,11 @@ export function fakeThreads(hostOn: On, options: {
         message: fake.updateFailure === 'network' ? 'Check network access.' : 'Quit Delta and retry.',
         retryable: true,
       } }), exitCode: 1, stderr: '' }
+    const status = argv.includes('--check') || !fake.updateCanInstall ? fake.updateStatus : fake.updateInstallStatus
     return { stdout: fake.updateFailure === 'malformed' ? '{}' : JSON.stringify({
-      schema_version: 1, status: argv.includes('--check') || !fake.updateCanInstall ? fake.updateStatus : fake.updateInstallStatus,
-      current_version: '1.0.0', latest_version: '1.1.0', channel: 'stable',
+      schema_version: 1, status, current_version: '1.0.0', latest_version: '1.1.0', channel: 'stable',
       can_install: fake.updateCanInstall, message: fake.updateMessage,
+      ...status === 'install_ready' ? { install_argv: UPDATE_HELPER_ARGV } : {},
     }), exitCode: 0, stderr: '' }
   }
   on('process.run', async ($, e) => {
@@ -958,6 +977,7 @@ export function fakeThreads(hostOn: On, options: {
       return { value: { exitCode, stdout: new TextDecoder().decode(bytes.subarray(0, limit)), stderr,
         isStdoutTruncated: bytes.length > limit, isStderrTruncated: false } }
     }
+    if (argv[0] === 'where.exe') return output(`${WINDOWS_DELTA}\r\n`)
     if (argv[0] === 'sh') {
       const discovery = !argv[2]?.includes('--non-interactive')
       if (discovery && e.init?.timeoutMs === 5_000) fake.updateDiscoveries++
@@ -968,7 +988,7 @@ export function fakeThreads(hostOn: On, options: {
       return output('/selected/delta\n')
     }
     const parsed = cliArguments(argv)
-    if (argv[0] === '/selected/delta' && argv[1] === 'update' &&
+    if ((argv[0] === '/selected/delta' || argv[0] === WINDOWS_DELTA) && argv[1] === 'update' &&
         (argv.slice(2).join(' ') === '--check --json' || argv.slice(2).join(' ') === '--json')) {
       fake.installUpdates.push({ argv, timeoutMs: e.init?.timeoutMs, env: e.init?.env })
       const result = await updateOutput(argv)
@@ -1152,7 +1172,30 @@ export function fakeThreads(hostOn: On, options: {
   })
   on('process.spawn', async function* ($, e, next) {
     expectLabelled(e.argv, e.env)
-    if (e.argv[0] === '/selected/delta' && e.argv[1] === 'update') {
+    if (e.argv[0] === UPDATE_HELPER) {
+      fake.installUpdates.push({ argv: [...e.argv], env: e.env })
+      const outcome = fake.helperOutcome
+      if (outcome === 'crash') return { value: { code: 3221225477, signal: null } }
+      if (typeof outcome === 'object') {
+        yield { stream: 'stderr', text: `delta: ${outcome.message}\n` }
+        yield { stream: 'stdout', text: JSON.stringify({ error: { ...outcome, retryable: false } }) }
+        return { value: { code: 2, signal: null } }
+      }
+      yield { stream: 'stderr', text: `${UPDATE_HELPER_PROGRESS}\n` }
+      if (fake.holdHelper && !await Promise.race([fake.holdHelper.then(() => true), new Promise<false>((resolve) => {
+        next.signal.addEventListener('abort', () => resolve(false), { once: true })
+      })])) {
+        fake.helperStopped = true
+        return { value: { code: null, signal: 'SIGTERM' } }
+      }
+      yield { stream: 'stdout', text: JSON.stringify({
+        schema_version: 1, status: 'updated', current_version: '1.0.0', latest_version: '1.1.0', channel: 'stable',
+        can_install: true, message: 'Delta was updated.',
+        ...outcome === 'unsaid' ? {} : { restart_required: outcome === 'restart' },
+      }) }
+      return { value: { code: 0, signal: null } }
+    }
+    if ((e.argv[0] === '/selected/delta' || e.argv[0] === WINDOWS_DELTA) && e.argv[1] === 'update') {
       fake.installUpdates.push({ argv: [...e.argv], env: e.env })
       yield { stream: 'stderr', text: 'Downloading Delta: ' }
       yield { stream: 'stderr', text: '25%\nPreparing Delta update...\n' }

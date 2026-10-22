@@ -1,6 +1,9 @@
 import { expect, test as kitTest, tier } from 'claude-code/testing'
 import { parseInstallUpdate } from './install-update'
-import { fakeThreads, prompt, sessionStart, testsWithHeldClockWait, typedDelta } from '../testing/fake-thread-commands'
+import {
+  fakeThreads, prompt, sessionStart, testsWithHeldClockWait, typedDelta, UPDATE_HELPER_ARGV, UPDATE_HELPER_PROGRESS,
+  WINDOWS_DELTA,
+} from '../testing/fake-thread-commands'
 
 tier('user')
 const test = testsWithHeldClockWait(kitTest)
@@ -58,7 +61,7 @@ for (const command of ['delta-update', 'delta'] as const)
     expect(result.text).toContain('Updated Delta to 1.1.0')
     expect(result.text).toContain('Restart Claude Code')
     const updates = fake.installUpdates.filter((entry) => !entry.argv.includes('--check'))
-    expect(updates).toHaveLength(1)
+    expect(updates.map((entry) => entry.argv)).toEqual([['/selected/delta', 'update', '--json']])
     expect(updates[0]!.env).toMatchObject({
       DELTA_CLI_INTEGRATION: 'claude_code',
       DELTA_CLI_COMMAND_FORM: command === 'delta' ? 'delta_subcommand' : 'dedicated_command',
@@ -66,19 +69,56 @@ for (const command of ['delta-update', 'delta'] as const)
     fake.expectClean()
   })
 
-test('an update reports installer handoff without claiming installation finished', async ($, on) => {
-  const fake = fakeThreads(on)
-  fake.updateInstallStatus = 'update_started'
-  fake.updateMessage = 'Check C:\\Delta\\update.log for installer diagnostics.'
+const WINDOWS_OUTCOMES = {
+  installed: 'Updated Delta to 1.1.0. Restart Claude Code to use the updated installation.',
+  restart: 'Updated Delta to 1.1.0. Windows reports that a restart is required to finish the installation; restart Windows, then Claude Code.',
+  refused: 'Delta installation update failed: update: app_running: Delta is running. Quit it, then update again.',
+  crash: 'Delta installation update failed: The Delta installer helper exited with code 3221225477. Run `delta update --check` before retrying /delta-update.',
+  unsaid: 'Delta installation update failed: Unexpected Delta update response. Update your Delta installation from https://delta.dev, then restart Claude Code and retry /delta-update.',
+} as const
+
+test('on Windows the plugin runs the installer once the CLI exits and reports each outcome', async ($, on) => {
+  const fake = fakeThreads(on, { env: { OS: 'Windows_NT' } })
+  fake.updateInstallStatus = 'install_ready'
   await $.session.start(sessionStart)
-  const result = await $.command.run(typedDelta('update'))
-  expect(result.text).toBe('Delta update handoff to 1.1.0 was accepted; installation completion has not been confirmed. '
-    + 'Check C:\\Delta\\update.log for installer diagnostics. '
-    + 'Wait for the update process to finish, then run `delta update --check` to check the installation before restarting Claude Code or retrying /delta-update.')
+  for (const [outcome, expected] of Object.entries(WINDOWS_OUTCOMES)) {
+    fake.helperOutcome = outcome === 'refused'
+      ? { code: 'app_running', message: 'Delta is running. Quit it, then update again.' }
+      : outcome as 'installed' | 'restart' | 'crash' | 'unsaid'
+    expect((await $.command.run(typedDelta('update'))).text).toBe(expected)
+  }
+  const cli = [WINDOWS_DELTA, 'update', '--download-only', '--json']
+  expect(fake.installUpdates.filter((entry) => !entry.argv.includes('--check')).map((entry) => entry.argv))
+    .toEqual(Object.keys(WINDOWS_OUTCOMES).flatMap(() => [cli, UPDATE_HELPER_ARGV]))
+  expect(fake.logs).toContain(UPDATE_HELPER_PROGRESS)
   fake.expectClean()
 })
 
-for (const status of ['updated', 'update_started'] as const)
+test('an installer the plugin did not ask for is refused and never started', async ($, on) => {
+  const fake = fakeThreads(on)
+  fake.updateInstallStatus = 'install_ready'
+  await $.session.start(sessionStart)
+  expect((await $.command.run(typedDelta('update'))).text).toContain('Unexpected Delta update response.')
+  expect(fake.installUpdates.map((entry) => entry.argv[0])).not.toContain(UPDATE_HELPER_ARGV[0])
+  fake.expectClean()
+})
+
+test('a Windows installer still running at the deadline is left to finish', async ($, on) => {
+  const fake = fakeThreads(on, { env: { OS: 'Windows_NT' } })
+  fake.updateInstallStatus = 'install_ready'
+  let release!: () => void
+  fake.holdHelper = new Promise<void>((resolve) => { release = resolve })
+  await $.session.start(sessionStart)
+  const updating = $.command.run(typedDelta('update'))
+  await fake.settleUntil(() => fake.logs.includes(UPDATE_HELPER_PROGRESS))
+  await fake.advance(600_000)
+  expect((await updating).text).toBe('Delta installation update failed: The Delta installer is still running after 10 minutes; it may be waiting for you to approve a Windows prompt. Let it finish, then run `delta update --check` before retrying /delta-update.')
+  expect(fake.helperStopped).toBe(false)
+  release()
+  fake.expectClean()
+})
+
+for (const status of ['updated', 'install_ready'] as const)
   test(`read-only checks reject ${status}`, async ($, on) => {
     const fake = fakeThreads(on)
     fake.updateStatus = status
@@ -129,16 +169,20 @@ test('update replies require the negotiated schema and typed version fields', ()
     expect(() => parseInstallUpdate(JSON.stringify({ ...result, ...changed }))).toThrow()
 })
 
-test('installer handoff requires a target version and installation capability', () => {
-  const result = { schema_version: 1, status: 'update_started', current_version: '1.0',
-    latest_version: '1.1', channel: 'stable', message: 'Installer launched', can_install: true }
-  expect(parseInstallUpdate(JSON.stringify(result))).toMatchObject({
-    status: 'update_started', currentVersion: '1.0', latestVersion: '1.1', canInstall: true,
+test('a ready installer requires a target version, installation capability and its command', () => {
+  const result = { schema_version: 1, status: 'install_ready', current_version: '1.0',
+    latest_version: '1.1', channel: 'stable', message: 'Ready', can_install: true,
+    install_argv: ['C:\\Updates\\helper.exe', '--internal-windows-update-install'] }
+  expect(parseInstallUpdate(JSON.stringify(result))).toEqual({
+    status: 'install_ready', currentVersion: '1.0', latestVersion: '1.1', message: 'Ready', canInstall: true,
+    installArgv: ['C:\\Updates\\helper.exe', '--internal-windows-update-install'],
   })
   for (const changed of [
-    { latest_version: null }, { latest_version: '' }, { can_install: false },
+    { latest_version: null }, { can_install: false }, { install_argv: undefined }, { install_argv: [] },
+    { install_argv: ['helper.exe', ''] },
   ])
     expect(() => parseInstallUpdate(JSON.stringify({ ...result, ...changed }))).toThrow()
+  expect(() => parseInstallUpdate(JSON.stringify({ ...result, status: 'updated', restart_required: 'yes' }))).toThrow()
 })
 
 for (const status of ['update_available', 'unsupported'] as const)
