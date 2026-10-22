@@ -67,7 +67,7 @@ describe('joining', () => {
     expect(await bandText($)).toContain('Waiting for Delta to connect')
     expect(fake.session).toBe(previousSession)
     fake.commandFault = undefined
-    await fake.clock.advance(2000)
+    await fake.advance(2000)
     expect(fake.session).not.toBe(previousSession)
     expect(fake.store.get(`session:${fake.session}`)).toMatchObject({ thread: fake.threadId, joined: true })
     await $.session.end(sessionEnd(fake.session))
@@ -80,7 +80,7 @@ describe('joining', () => {
     await $.session.start(sessionStart)
     await $.command.run({ ...shareCommand, args: `join ${link(fake)}` })
     await finishJoin(fake)
-    for (const wait of [2000, 4000, 8000, 16_000]) await fake.clock.advance(wait)
+    for (const wait of [2000, 4000, 8000, 16_000]) await fake.advance(wait)
     expect(fake.logs.join('\n')).toContain('disconnected. The previous session and folder were preserved.')
     expect(fake.session).toBe(previousSession)
     expect(fake.sessionCommands).toEqual([])
@@ -209,17 +209,17 @@ describe('joining', () => {
     expect((await $.prompt.submit(prompt(HANDOFF_PROMPT))).drop).toBeUndefined()
     expect(fake.entered.at(-1)?.text).toBe(HANDOFF_ACKNOWLEDGEMENT)
     await oneTurn($, 'opening', HANDOFF_ACKNOWLEDGEMENT, 'Joined.')
-    await fake.clock.advance(0)
+    await fake.advance(0)
     expect(fake.records()).toEqual([])
     // The person's next prompt is theirs, and the thread records it as usual.
     expect((await $.prompt.submit(prompt('What is left on the parser?'))).drop).toBeUndefined()
     expect(fake.entered.at(-1)?.text).toBe('What is left on the parser?')
     await oneTurn($, 'second', 'What is left on the parser?', 'The tests.')
-    await fake.clock.advance(0)
+    await fake.advance(0)
     expect(fake.records().length).toBeGreaterThan(0)
     expect(JSON.stringify(fake.records())).not.toContain('Joined.')
     // The offering tab sees the record claimed and stops offering; nothing is released.
-    await fake.clock.advance(2_000)
+    await fake.advance(2_000)
     expect(fake.unmounts).toEqual([])
     fake.expectClean()
     await $.session.end(sessionEnd(fake.session))
@@ -231,12 +231,12 @@ describe('joining', () => {
     let release!: () => void
     fake.holdRun = (operation) => operation === 'mount' ? new Promise<void>((resolve) => { release = resolve }) : undefined
     const starting = startInThreadFolder($, fake, offer.folder)
-    await fake.clock.settle()
+    await fake.settle()
     // Claude raises its classic startup hook too, while the hand-off's mount is still running.
     await $.classic.SessionStart({ session_id: fake.session, source: 'startup', cwd: offer.folder } as never)
-    await fake.clock.settle()
-    await fake.clock.advance(0)
-    await fake.clock.settle()
+    await fake.settle()
+    await fake.advance(0)
+    await fake.settle()
     expect(await bandText($)).not.toMatch(/Not set up|Not syncing/)
     release()
     await starting
@@ -265,7 +265,7 @@ describe('joining', () => {
   test('a hand-off no session joins within 5 minutes is released, saying how to bring it back', async ($, on) => {
     const fake = desktopTab(on, $)
     const offer = await offerFromDesktopTab($, fake)
-    await fake.clock.advance(HANDOFF_EXPIRY_MS + 2_000)
+    await fake.advance(HANDOFF_EXPIRY_MS + 2_000)
     expect(fake.unmounts).toEqual([{ thread: fake.threadId, owner: offer.owner }])
     expect(fake.files.has(offer.record)).toBe(false)
     const text = fake.logs.join('\n')
@@ -294,7 +294,7 @@ describe('joining', () => {
     fake.cwd = `${directory}/crates/deltadb/src`
     expect((await $.prompt.submit(prompt('from a subdirectory'))).drop).toBeUndefined()
     await $.tool.call(bash('nested', 'grep -n fn worktree_text.rs'))
-    await fake.clock.advance(0)
+    await fake.advance(0)
     expect(fake.updates().map((record) => record.update?.toolCallId)).toContain('nested')
     // The fresh session records under the producer name the join's negotiated contract allows.
     expect([...new Set(fake.producerNames())]).toEqual(['Claude Code'])
@@ -302,7 +302,7 @@ describe('joining', () => {
     // A sibling that only shares the path's prefix is another directory.
     fake.cwd = `${directory}-other`
     await $.tool.call(bash('outside', 'echo outside'))
-    await fake.clock.advance(0)
+    await fake.advance(0)
     expect(fake.updates().map((record) => record.update?.toolCallId)).not.toContain('outside')
     expect(fake.logs.join('\n')).toContain(`must run in ${directory}`)
     expect((await $.prompt.submit(prompt('from outside'))).drop).toBeDefined()
@@ -346,7 +346,7 @@ describe('joining', () => {
       const transcript = `/claude/projects/${parent}.jsonl`
       fake.files.set(transcript, '{"type":"user"}\n')
       await $.classic.Stop({ transcript_path: transcript, stop_hook_active: false } as any)
-      await fake.clock.settle()
+      await fake.settle()
       expect((fake.store.get(`session:${parent}`) as any).transcript).toBe(transcript)
       // Claude Code moves the conversation to a new session and says so at the end of the old transcript.
       fake.files.set(transcript, `{"type":"user"}\n{"type":"continued-in","sessionId":"${parent}","continuedInSessionId":"continued"}\n`)
@@ -361,7 +361,7 @@ describe('joining', () => {
       fake.producer = parent
       await $.session.start({ ...sessionStart, cwd: directory })
       await $.classic.SessionStart({ session_id: 'continued', source: 'fork', cwd: directory, transcript_path: '/claude/projects/continued.jsonl' } as never)
-      await fake.clock.advance(0)
+      await fake.advance(0)
       expect(fake.store.get('session:continued')).toMatchObject({
         thread: fake.threadId, joined: true, producer: parent, owner: parent, directory,
       })
@@ -372,7 +372,7 @@ describe('joining', () => {
       expect(fake.operations().some((operation) => ['create', 'attach', 'share'].includes(operation!))).toBe(false)
       expect((await $.prompt.submit(prompt('after the move'))).drop).toBeUndefined()
       await $.tool.call(bash('continued-tool', 'echo continued'))
-      await fake.clock.advance(0)
+      await fake.advance(0)
       expect(fake.updates().map((record) => record.update?.toolCallId)).toContain('continued-tool')
       const appends = fake.delta().filter((argv) => argv[3] === 'append')
       expect(appends.at(-1)![appends.at(-1)!.indexOf('--external-id') + 1]).toBe(parent)
@@ -405,7 +405,7 @@ describe('joining', () => {
     // Prompts wait while the worktrees come back, and the band shows the progress.
     expect(await bandText($)).toContain("Restoring the thread's worktrees")
     expect((await $.prompt.submit(prompt('too early'))).drop).toBeDefined()
-    await fake.clock.advance(0)
+    await fake.advance(0)
     expect(fake.cwd).toBe(binding.directory)
     expect(fake.sessionCommands.slice(moves)).toEqual([{ command: 'cd', args: binding.directory }])
     expect(fake.store.get(`session:${session}`)).toEqual(binding)
@@ -414,7 +414,7 @@ describe('joining', () => {
     expect(fake.operations().slice(commands).some((operation) => ['create', 'attach', 'share'].includes(operation!))).toBe(false)
     expect((await $.prompt.submit(prompt('after restore'))).drop).toBeUndefined()
     await $.tool.call(bash('new-tool', 'echo new local output'))
-    await fake.clock.advance(0)
+    await fake.advance(0)
     expect(fake.exports).toBe(0)
     expect(fake.updates()).toHaveLength(1)
     expect(fake.updates()[0]?.update?.toolCallId).toBe('new-tool')
@@ -424,7 +424,7 @@ describe('joining', () => {
     await $.session.end({ ...sessionEnd(session), reason: 'logout' })
     const before = fake.sessionCommands.length
     await $.session.start({ ...sessionStart, cwd: fake.cwd })
-    await fake.clock.advance(0)
+    await fake.advance(0)
     expect(fake.sessionCommands.length).toBe(before)
     expect(fake.server.groups.has(session)).toBe(true)
     fake.expectClean()
@@ -508,8 +508,8 @@ describe('joining', () => {
     expect(mounts()).toBe(1)
     // The thread's list is reported again after a reconnect and changes nothing.
     fake.live()!.exit(1)
-    await fake.clock.advance(0)
-    await fake.clock.advance(1000)
+    await fake.advance(0)
+    await fake.advance(1000)
     expect(fake.live()).toBeDefined()
     expect(mounts()).toBe(1)
     expect(fake.rows).toEqual([])
@@ -517,7 +517,7 @@ describe('joining', () => {
     // A second worktree: Claude was in the first one's checkout, so it moves up to the folder.
     scriptMounts(fake, ['delta', 'zed'], () => folder)
     fake.addWorktree('zed')
-    await fake.clock.advance(0)
+    await fake.advance(0)
     expect(mounts()).toBe(2)
     expect(fake.delta().filter((argv) => argv[3] === 'mount').map((argv) => argv.includes('--join'))).toEqual([true, false])
     expect(fake.cwd).toBe(folder)
@@ -536,13 +536,13 @@ describe('joining', () => {
     const moves = fake.sessionCommands.length
     scriptMounts(fake, ['delta', 'zed', 'web'], () => folder)
     fake.addWorktree('web')
-    await fake.clock.advance(0)
+    await fake.advance(0)
     scriptMounts(fake, ['delta', 'web'], () => folder)
     fake.removeWorktree('zed')
-    await fake.clock.advance(0)
+    await fake.advance(0)
     scriptMounts(fake, ['delta'], () => folder)
     fake.removeWorktree('web')
-    await fake.clock.advance(0)
+    await fake.advance(0)
     expect(fake.sessionCommands.length).toBe(moves)
     expect(fake.cwd).toBe(folder)
     expect((fake.store.get(`session:${session}`) as any).directory).toBe(folder)
@@ -565,11 +565,11 @@ describe('joining', () => {
     await $.turn.start(turnStart('running'))
     scriptMounts(fake, ['delta', 'zed'], () => `${FOLDERS}/${session}`)
     fake.addWorktree('zed')
-    await fake.clock.advance(0)
+    await fake.advance(0)
     expect(fake.cwd).toBe(own)
     expect(fake.rows).toEqual([])
     await $.turn.complete(turnComplete('running'))
-    await fake.clock.advance(0)
+    await fake.advance(0)
     expect(fake.cwd).toBe(`${FOLDERS}/${session}`)
     expect(fake.rows).toHaveLength(2)
     await $.session.end(sessionEnd(session))
@@ -688,10 +688,10 @@ describe('joining', () => {
     await $.command.run({ ...shareCommand, args: `join ${link(fake)}` })
     await finishJoin(fake)
     fake.live()!.write('{"type":"item","item":{"id":""}}\n')
-    await fake.clock.settle()
+    await fake.settle()
     expect(fake.logs.some((log) => log.startsWith('Connection interrupted'))).toBe(true)
     expect((await $.prompt.submit(prompt('invalid'))).drop).toBeDefined()
-    await fake.clock.advance(1000)
+    await fake.advance(1000)
     expect((await $.prompt.submit(prompt('ready after automatic reconnect'))).drop).toBeUndefined()
     fake.expectClean()
   })
@@ -705,14 +705,14 @@ describe('joining', () => {
     expect((await $.prompt.submit(prompt('offline'))).drop).toBeUndefined()
     await $.turn.start(turnStart('native-offline'))
     fake.live()!.exit(1)
-    await fake.clock.settle()
+    await fake.settle()
     expect(fake.aborts).toEqual(['native-offline'])
     // Observing turn.abort does not mean its asynchronous finish is persisted.
     // The host's aborted completion provides the durable lifecycle boundary.
     await $.turn.complete(turnComplete('native-offline', 'aborted'))
     expect((fake.store.get(`session:${fake.session}`) as any).pending).toHaveLength(2)
     fake.appendOffline = false
-    await fake.clock.advance(60_000)
+    await fake.advance(60_000)
     expect(fake.finishes()).toEqual(fake.starts())
     expect(fake.entered).toHaveLength(1)
     fake.expectClean()
@@ -728,7 +728,7 @@ describe('joining', () => {
     let release!: () => void
     fake.holdAbort = new Promise<void>((resolve) => { release = resolve })
     fake.live()!.exit(1)
-    await fake.clock.settle()
+    await fake.settle()
     expect(fake.aborts).toEqual(['native-held-abort'])
     // The old abort is still held, but completion and a new observer can proceed.
     fake.holdAbort = undefined
@@ -736,7 +736,7 @@ describe('joining', () => {
     await $.session.end(sessionEnd(fake.session))
     fake.server.items.set('fresh', remoteItem('New observer live snapshot', { id: 'fresh' }))
     await $.session.start(sessionStart)
-    await fake.clock.settle()
+    await fake.settle()
     await drawBandText($)
     const live = fake.live()!
     // A press handle is new with every draw; the band is otherwise the same.
@@ -744,7 +744,7 @@ describe('joining', () => {
     const band = await drawnBand()
     expect(band).toContain(LIVE)
     release()
-    await fake.clock.settle()
+    await fake.settle()
     await drawBandText($)
     expect(await drawnBand()).toBe(band)
     expect((await $.prompt.submit(prompt('new observer still ready'))).drop).toBeUndefined()
@@ -763,15 +763,15 @@ describe('joining', () => {
     let release!: () => void
     fake.holdAbort = new Promise<void>((resolve) => { release = resolve })
     fake.live()!.exit(1)
-    await fake.clock.settle()
+    await fake.settle()
     expect(fake.aborts).toEqual(['native-running'])
     // Sharing pauses at the drop, as it did before the watch's phases were modelled.
     expect((await $.prompt.submit(prompt('during teardown'))).drop).toContain('checkout sharing is paused')
     fake.holdAbort = undefined
     release()
     await $.turn.complete(turnComplete('native-running', 'aborted'))
-    await fake.clock.settle()
-    await fake.clock.advance(1000)
+    await fake.settle()
+    await fake.advance(1000)
     expect(fake.live()?.ready).toBe(true)
     expect((await $.prompt.submit(prompt('after reconnect'))).drop).toBeUndefined()
     fake.expectClean()
@@ -785,11 +785,11 @@ describe('joining', () => {
     fake.appendFaults.push({ accept: 0, exitCode: 2,
       stdout: () => JSON.stringify({ error: { code: 'access_denied', message: 'access revoked', retryable: false } }) })
     await $.tool.call(bash('retry-tool', 'echo still queued'))
-    await fake.clock.advance(0)
+    await fake.advance(0)
     expect((await $.prompt.submit(prompt('cannot run yet'))).drop).toBeDefined()
     fake.live()!.exit(1)
-    await fake.clock.advance(0)
-    await fake.clock.advance(1000)
+    await fake.advance(0)
+    await fake.advance(1000)
     expect((await $.prompt.submit(prompt('reconnect cannot authorize'))).drop).toBeDefined()
     fake.statusPatch = { access: { state: 'local_only', is_owner: null } }
     await $.command.run({ ...shareCommand, args: `join ${link(fake)}` })
@@ -815,11 +815,11 @@ describe('joining', () => {
       await $.turn.start(turnStart('previous-turn'))
       await $.tool.call(bash('previous-tool', 'echo recorded'))
       await $.turn.complete(turnComplete('previous-turn'))
-      await fake.clock.advance(0)
+      await fake.advance(0)
       const recorded = structuredClone(fake.records())
       fake.appendOffline = true
       await $.tool.call(bash('pending-tool', 'echo queued'))
-      await fake.clock.advance(0)
+      await fake.advance(0)
       const session = fake.session
       const binding = structuredClone(fake.store.get(`session:${session}`)) as any
       const files = binding.pending.flatMap((entry: any) => entry.files).map((path: string) => [path, fake.files.get(path)])
@@ -830,7 +830,7 @@ describe('joining', () => {
       fake.server.items.set(item.id, item)
       fake.store.set(`appended:${session}`, ledger)
       fake.live()!.exit(1)
-      await fake.clock.advance(0)
+      await fake.advance(0)
       const transitions = structuredClone(fake.sessionCommands)
       const commands = fake.operations().length
       // Recovery needs no transition commands, even when the host no longer offers them.
@@ -872,7 +872,7 @@ describe('joining', () => {
     await finishJoin(fake)
     fake.appendOffline = true
     await $.tool.call(bash('old-pending', 'echo queued for the first thread'))
-    await fake.clock.advance(0)
+    await fake.advance(0)
     const previous = fake.session
     const binding = structuredClone(fake.store.get(`session:${previous}`)) as any
     const transitions = fake.sessionCommands.length
@@ -917,14 +917,14 @@ describe('joining', () => {
       if (session === previous && ++inspections === 2) { observed(); return held }
     }
     await $.command.run({ ...shareCommand, args: `join ${link(fake)}` })
-    const recovery = fake.clock.advance(0)
+    const recovery = fake.advance(0)
     await waiting
     await $.session.end(sessionEnd(previous))
     fake.session = 'replacement-session'
     const replacement = { ...binding, session: fake.session, owner: fake.session }
     fake.store.set(`session:${fake.session}`, replacement)
     await $.session.start({ ...sessionStart, cwd: fake.cwd })
-    await fake.clock.advance(0)
+    await fake.advance(0)
     const watch = fake.live()!
     const commands = fake.operations().length
     release()
@@ -951,7 +951,7 @@ describe('joining', () => {
     const held = new Promise<void>((resolve) => { release = resolve })
     fake.holdCommandListFor = () => { observed(); return held }
     await $.command.run({ ...shareCommand, args: `join ${link(fake)}` })
-    const transition = fake.clock.advance(0)
+    const transition = fake.advance(0)
     await waiting
     const fresh = fake.session
     await $.session.end(sessionEnd(fresh))
@@ -982,7 +982,7 @@ describe('joining', () => {
       if (session.endsWith('-fresh')) { observed(); return held }
     }
     await $.command.run({ ...shareCommand, args: `join ${link(fake)}` })
-    const transition = fake.clock.advance(0)
+    const transition = fake.advance(0)
     await waiting
     const fresh = fake.session
     await $.session.end(sessionEnd(fresh))
@@ -1097,4 +1097,4 @@ async function bandText($: Engine) {
   return JSON.stringify(await $.ui.render(abovePrompt))
 }
 
-async function finishJoin(fake: ReturnType<typeof fakeThreads>) { await fake.clock.advance(0) }
+async function finishJoin(fake: ReturnType<typeof fakeThreads>) { await fake.advance(0) }

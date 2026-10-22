@@ -9,7 +9,7 @@ test('startup checks once, read-only, and notifies without changing sync state',
   const fake = fakeThreads(on)
   fake.updateStatus = 'update_available'
   await $.session.start(sessionStart)
-  await fake.clock.advance(0)
+  await fake.advance(0)
   await fake.settleUntil(() => fake.logs.some((text) => text.includes('1.1.0 is available')))
   expect(fake.installUpdates).toHaveLength(1)
   expect(fake.installUpdates[0]).toMatchObject({
@@ -19,7 +19,7 @@ test('startup checks once, read-only, and notifies without changing sync state',
   expect(fake.cliSetups).toEqual([])
   expect(fake.operations()).toEqual([])
   await $.session.start(sessionStart)
-  await fake.clock.advance(0)
+  await fake.advance(0)
   expect(fake.installUpdates).toHaveLength(1)
   fake.expectClean()
 })
@@ -30,14 +30,14 @@ test('a stalled startup check cannot block prompts or sharing and expires withou
   let release!: () => void
   fake.holdUpdate = new Promise<void>((resolve) => { release = resolve })
   await $.session.start(sessionStart)
-  await fake.clock.advance(0)
+  await fake.advance(0)
   await fake.settleUntil(() => fake.installUpdates.length === 1)
   expect((await $.prompt.submit(prompt('hello'))).drop).toBeUndefined()
   expect(await fake.share($)).toContain('https://delta.dev/join/')
-  await fake.clock.advance(10_000)
+  await fake.advance(10_000)
   await fake.settleUntil(() => fake.updateDebug.some((text) => text.includes('update check timed out')))
   release()
-  await fake.clock.settle()
+  await fake.settle()
   expect(fake.logs.some((text) => text.includes('1.1.0 is available'))).toBe(false)
   fake.expectClean()
 })
@@ -83,7 +83,7 @@ for (const status of ['updated', 'update_started'] as const)
     const fake = fakeThreads(on)
     fake.updateStatus = status
     await $.session.start(sessionStart)
-    await fake.clock.advance(0)
+    await fake.advance(0)
     await fake.settleUntil(() => fake.updateDebug.some((text) =>
       text.includes('Unexpected installation change reported by a read-only update check')))
     expect(fake.logs.some((text) => text.includes('1.1.0'))).toBe(false)
@@ -97,7 +97,7 @@ test('a stalled explicit update times out and allows a later retry', async ($, o
   fake.holdUpdate = new Promise<void>((resolve) => { release = resolve })
   const updating = $.command.run(typedDelta('update'))
   await fake.settleUntil(() => fake.logs.includes('Preparing Delta update...'))
-  await fake.clock.advance(600_000)
+  await fake.advance(600_000)
   expect((await updating).text).toContain('update timed out')
   release()
   fake.holdUpdate = undefined
@@ -110,7 +110,7 @@ for (const failure of ['old-cli', 'network', 'app-running', 'malformed'] as cons
     const fake = fakeThreads(on)
     fake.updateFailure = failure
     await $.session.start(sessionStart)
-    await fake.clock.advance(0)
+    await fake.advance(0)
     await fake.settleUntil(() => [...fake.logs, ...fake.updateDebug].some((text) => text.startsWith('Delta update check:')))
     const result = await $.command.run(typedDelta('update'))
     expect(result.text).toContain(failure === 'old-cli' || failure === 'malformed'
@@ -150,7 +150,7 @@ for (const status of ['update_available', 'unsupported'] as const)
       ? 'Quit Delta, then run the Windows installer from https://delta.dev.'
       : 'Update Delta through your package manager.'
     await $.session.start(sessionStart)
-    await fake.clock.advance(0)
+    await fake.advance(0)
     const notice = status === 'update_available'
       ? `Delta 1.1.0 is available (installed: 1.0.0). ${fake.updateMessage}`
       : `Delta update check: ${fake.updateMessage}`

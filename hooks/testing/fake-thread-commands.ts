@@ -259,7 +259,7 @@ export async function drawReady($: Engine, fake: ReturnType<typeof fakeThreads>)
     const before = fake.rows.length
     await drawBandText($)
     // A row's draw is awaited by the row loop, so let its continuation queue the next one.
-    await fake.clock.settle()
+    await fake.settle()
     if (fake.rows.length === before) return
   }
 }
@@ -305,7 +305,7 @@ export function expectOfferedItems(fake: ReturnType<typeof fakeThreads>, ids: st
  * Tests change behavior through the returned object's mutable fields rather
  * than registering competing hooks for the same events.
  */
-export function fakeThreads(on: On, options: {
+export function fakeThreads(hostOn: On, options: {
   session?: string
   thread?: string
   messages?: ApiMessage[]
@@ -313,6 +313,29 @@ export function fakeThreads(on: On, options: {
 } = {}) {
   const session = options.session ?? `session-${++sessions}`
   const engine = testEngine
+  /**
+   * Counts each call the fake answers, once as it starts and once as it ends, so `settle` can tell
+   * when the plugin has gone quiet.
+   */
+  let activity = 0
+  // The kit's `On` is overloaded per event, which a forwarding wrapper cannot spell; `any` stays in this fake.
+  const on = ((event: any, ...rest: any[]) => {
+    const handler = rest.pop()
+    // A streaming event takes an async generator, which the kit checks for by kind.
+    const counted = Object.prototype.toString.call(handler) === '[object AsyncGeneratorFunction]'
+      ? async function* (...args: any[]) {
+        activity++
+        try { return yield* handler(...args) } finally { activity++ }
+      }
+      : (...args: any[]) => {
+        activity++
+        const result = handler(...args)
+        if (result instanceof Promise) return result.finally(() => { activity++ })
+        activity++
+        return result
+      }
+    return (hostOn as any)(event, ...rest, counted)
+  }) as On
   /** Waiters for `waitForLog`; the `ui.log` hook answers them as matching lines arrive. */
   const logWaiters: { start: number; match: (log: string) => boolean; resolve: (log: string) => void }[] = []
   /** Waiters for a share link, which the plugin writes only to the debug log. */
@@ -688,6 +711,23 @@ export function fakeThreads(on: On, options: {
      */
     async settleUntil(done: () => boolean) {
       while (!done()) await fake.clock.settle()
+    },
+    /**
+     * Settle the clock until the plugin has gone quiet: until a settle passes in which the plugin made no
+     * call the fake answers. One settle can return while a chain of host calls is still between steps on a
+     * loaded machine, so a test that looks at what the plugin did waits for this instead.
+     */
+    async settle() {
+      let before: number
+      do {
+        before = activity
+        await fake.clock.settle()
+      } while (activity !== before)
+    },
+    /** Move the clock `ms` on, then settle until the plugin has gone quiet, as `settle` does. */
+    async advance(ms: number) {
+      await fake.clock.advance(ms)
+      await fake.settle()
     },
     /** Resolves with the first log at or after `start` that `match` accepts, now or later. */
     waitForLog(start: number, match: (log: string) => boolean): Promise<string> {

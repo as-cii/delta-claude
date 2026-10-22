@@ -40,7 +40,7 @@ describe('startup and commands', () => {
     for (const [command, args] of [['delta-share', ''], ['delta', 'share']]) {
       const link = fake.waitForShareLink()
       expect(await run(command!, args!)).toEqual({})
-      await fake.clock.advance(0)
+      await fake.advance(0)
       expect(await link).toBe(`https://delta.dev/join/${fake.shareId}`)
     }
     expect(fake.commandRuns).toEqual([])
@@ -62,7 +62,7 @@ describe('sharing', () => {
       snapshot: true, next: 1, pending: [] }
     fake.store.set(`session:${fake.session}`, binding)
     await $.session.start(sessionStart)
-    await fake.clock.settle()
+    await fake.settle()
     expect(fake.cliSetups).toEqual(['discover'])
     expect(fake.store.get(`session:${fake.session}`)).toEqual(binding)
     expect(fake.operations()).toEqual([])
@@ -99,7 +99,7 @@ describe('sharing', () => {
     }
     await $.session.start(sessionStart)
     await $.command.run(shareCommand)
-    const running = fake.clock.advance(0)
+    const running = fake.advance(0)
     await waiting
     if (change === 'session') {
       await $.session.end(sessionEnd(fake.session))
@@ -173,7 +173,7 @@ describe('sharing', () => {
     await $.session.start(sessionStart)
     for (const args of ['share', 'share ada@example.com', 'join some-link'])
       expect((await $.command.run(typedDelta(args))).text).toContain('needs an interactive Claude Code terminal or Desktop Code tab')
-    await fake.clock.advance(0)
+    await fake.advance(0)
     expect(fake.delta()).toEqual([])
     expect(fake.exports).toBe(0)
     fake.expectClean()
@@ -249,7 +249,7 @@ describe('sharing', () => {
     const commands = fake.operations().length
     await $.session.end(sessionEnd(fake.session))
     await $.session.start(sessionStart)
-    await fake.clock.settle()
+    await fake.settle()
     expectNoSetupCommands(fake, commands)
     expect((fake.store.get(`session:${fake.session}`) as any).pending).toEqual(staged)
     expect(fake.server.shared).toBe(false)
@@ -284,7 +284,7 @@ describe('sharing', () => {
     const commands = fake.operations().length
     await $.session.end(sessionEnd(fake.session))
     await $.session.start(sessionStart)
-    await fake.clock.settle()
+    await fake.settle()
     expectNoSetupCommands(fake, commands)
     expect(fake.server.shared).toBe(operation === 'share')
     expect(fake.server.mount).toEqual(mount)
@@ -343,7 +343,7 @@ describe('sharing', () => {
     await $.session.end(sessionEnd(fake.session))
     if (failure === 'local binding') fake.store.delete(`session:${fake.session}`)
     await $.session.start(sessionStart)
-    await fake.clock.settle()
+    await fake.settle()
     expectNoSetupCommands(fake, commands)
     expect(fake.server.thread).toBe(fake.threadId)
     expect(fake.server.shared).toBe(false)
@@ -421,7 +421,7 @@ describe('sharing', () => {
     const mount = { ...fake.server.mount }
     const commands = fake.operations().length
     await $.session.start(sessionStart)
-    await fake.clock.settle()
+    await fake.settle()
     const submitted = await $.prompt.submit(prompt('continue after resume'))
     if (state === 'attached') {
       expect(fake.live()?.ready).toBe(true)
@@ -431,7 +431,7 @@ describe('sharing', () => {
       expect(fake.entered).toEqual([])
     }
     await $.tool.call(bash('after-resume', 'echo after resume'))
-    await fake.clock.settle()
+    await fake.settle()
     expectNoSetupCommands(fake, commands)
     expect(fake.server.mount).toEqual(mount)
     expect(fake.server.shared).toBe(state !== 'unshared')
@@ -460,10 +460,10 @@ describe('sharing', () => {
       fake.statusPatch = { access: { state: 'granted', is_owner: null } }
       fake.commandFault = { operation: 'status', code: 'not_visible', reason: 'access_denied', message: 'Cannot verify authenticated access' }
       await $.session.start(sessionStart)
-      await fake.clock.settle()
+      await fake.settle()
       expect((await $.prompt.submit(prompt('participate'))).drop).toBeDefined()
       await $.tool.call(bash('access-checked', 'echo local'))
-      await fake.clock.settle()
+      await fake.settle()
       expect(fake.records()).toHaveLength(1)
       expectNoSetupCommands(fake, commands)
       expect(fake.store.get(`session:${fake.session}`)).toMatchObject({ thread: fake.threadId })
@@ -483,7 +483,7 @@ describe('sharing', () => {
       fake.statusPatch = { worktrees: { status: 'available', items: [other] } }
       const commands = fake.operations().length
       await $.session.start(sessionStart)
-      await fake.clock.settle()
+      await fake.settle()
       expect((await $.prompt.submit(prompt('unsafe'))).drop).toBeDefined()
       expect(fake.store.get(`session:${fake.session}`)).toEqual(saved)
       expect(fake.records()).toHaveLength(1)
@@ -549,7 +549,7 @@ describe('recording', () => {
       .map((record) => record.update?.toolCallId)).toEqual(['edit-live', 'edit-live'])
 
     await $.turn.complete(turnComplete('native-live'))
-    await fake.clock.settle()
+    await fake.settle()
     fake.expectClean()
   })
 
@@ -571,7 +571,7 @@ describe('recording', () => {
     fake.messages = [userText('compacted-away')]
     await $.session.end(sessionEnd(fake.session))
     await $.session.start(sessionStart)
-    await fake.clock.settle()
+    await fake.settle()
     expect(await fake.share($)).toBe(`https://delta.dev/join/${fake.shareId}`)
     expect(fake.records().map((record) => record.sequence)).toEqual([1, 2])
     expect(fake.server.records.get(2)?.line + '\n').toBe([...pendingFiles.values()].join(''))
@@ -588,7 +588,7 @@ describe('recording', () => {
     await fake.share($)
     await $.tool.call(bash('first', 'echo first'))
     await $.tool.call({ tool: 'ExitPlanMode', tool_use_id: 'plan', plan: 'Do it' } as never)
-    await fake.clock.settle()
+    await fake.settle()
     expect(fake.updates().map((record) => record.update)).toEqual([
       expect.anything(),
       expect.objectContaining({ toolCallId: 'first', name: 'Bash', title: 'echo first', kind: 'execute' }),
@@ -604,7 +604,7 @@ describe('recording', () => {
       error: { code: 'failed', reason: 'sync', message: 'Delta did not confirm the record within 10 seconds', retryable: true } }) }
     fake.appendFaults.push(failure, failure)
     await $.tool.call(bash('unsent', 'echo unsent'))
-    await fake.clock.settle()
+    await fake.settle()
     const shown = () => fake.logs.filter((log) => log.includes('sync'))
     expect(shown()).toHaveLength(1)
     // The band shows the retry in yellow while the watch stays live.
@@ -613,13 +613,13 @@ describe('recording', () => {
     expect(fake.records()).toHaveLength(1)
     expectStagedRecords(fake, [2])
     // Nothing else happens to trigger delivery: the retry is scheduled by the failure itself.
-    await fake.clock.advance(2000)
-    await fake.clock.settle()
+    await fake.advance(2000)
+    await fake.settle()
     expect(fake.appendCalls).toBeGreaterThanOrEqual(3)
     expectStagedRecords(fake, [2])
     expect(shown()).toHaveLength(1)
-    await fake.clock.advance(4000)
-    await fake.clock.settle()
+    await fake.advance(4000)
+    await fake.settle()
     expect(fake.records().map((record) => record.sequence)).toEqual([1, 2])
     expectStagedRecords(fake, [])
     // Each retry names the producer again, rather than only the append that first carried the record.
@@ -643,28 +643,28 @@ describe('recording', () => {
     for (let attempt = 0; attempt < 10; attempt++)
       fake.appendFaults.push(appendEnvelope('invalid_record', 'the server refused the record', { retryable: false }))
     await $.tool.call(bash('poison', 'echo poison'))
-    await fake.clock.settle()
+    await fake.settle()
     const paused = 'invalid_record'
     expect(fake.logs.filter((log) => log.includes(paused))).toHaveLength(1)
     // A live watch does not make delivery healthy: the band shows the pause, in red, with what to do.
     expect(await drawBandText($)).toContain(paused)
     expect(await drawBandText($)).toContain('"color":"red"')
     expectStagedRecords(fake, [2])
-    await fake.clock.advance(120_000)
+    await fake.advance(120_000)
     // Neither remote activity nor a passing checkout check lifts a refusal of the record itself.
     fake.upsert(remoteItem('Remote edit'))
-    await fake.clock.settle()
+    await fake.settle()
     await drawBandText($)
     expect(fake.appendCalls).toBe(calls + 1)
     // The pause stops delivery, not Claude: the prompt is accepted; the next recorded row retries
     // once, reports the same reason once, and then stays queued.
     expect((await $.prompt.submit(prompt('still refused'))).drop).toBeUndefined()
     await $.tool.call(bash('queued-behind', 'echo behind'))
-    await fake.clock.settle()
+    await fake.settle()
     expect(fake.appendCalls).toBe(calls + 2)
     expect(fake.logs.filter((log) => log.includes(paused))).toHaveLength(1)
     await $.tool.call(bash('queued-behind-2', 'echo behind'))
-    await fake.clock.settle()
+    await fake.settle()
     expect(fake.appendCalls).toBe(calls + 2)
     expectStagedRecords(fake, [2, 3, 4])
     // Reattaching resumes delivery, in order, once the cause is repaired.
@@ -693,7 +693,7 @@ describe('recording', () => {
     expect(fake.logs.filter((log) => log.includes('failed (sync): Delta did not confirm the record'))).toHaveLength(1)
     const calls = fake.appendCalls
     await $.session.end(sessionEnd(fake.session))
-    await fake.clock.advance(120_000)
+    await fake.advance(120_000)
     expect(fake.appendCalls).toBe(calls)
     // A new session starts its backoff over rather than inheriting the old attempts.
     fake.appendFaults.push(appendEnvelope('failed', 'Delta did not confirm the record', { reason: 'sync', retryable: true }))
@@ -701,7 +701,7 @@ describe('recording', () => {
     // Recovery is a chain of host calls, which a loaded machine can leave unfinished after one settle.
     await fake.settleUntil(() => fake.appendCalls > calls)
     expect(fake.appendCalls).toBe(calls + 1)
-    await fake.clock.advance(2000)
+    await fake.advance(2000)
     // The retry delivers the queued records; wait for them to be acknowledged, as a loaded machine can
     // leave that unfinished after the advance settles.
     await fake.settleUntil(() => !(fake.store.get(`session:${fake.session}`) as { pending: unknown[] }).pending.length)
@@ -718,15 +718,15 @@ describe('recording', () => {
     fake.holdStatus = new Promise<void>((resolve) => { release = resolve })
     fake.commandFault = { operation: 'status', code: 'not_visible', message: 'denied' }
     await $.tool.call(bash('in-flight', 'echo in flight'))
-    await fake.clock.settle()
+    await fake.settle()
     await $.session.end(sessionEnd(fake.session))
     release()
-    await fake.clock.settle()
+    await fake.settle()
     fake.holdStatus = undefined
     fake.commandFault = undefined
     // A new session is not paused by the old one's refused check, so it delivers what was queued.
     await $.session.start(sessionStart)
-    await fake.clock.settle()
+    await fake.settle()
     expect(fake.records().map((record) => record.sequence)).toEqual([1, 2])
     fake.expectClean()
   })
@@ -741,12 +741,12 @@ describe('recording', () => {
     fake.holdAppend = new Promise<void>((resolve) => { release = resolve })
     fake.appendFaults.push(appendEnvelope('failed', 'Delta did not confirm the record', { reason: 'sync', retryable: true }))
     await $.tool.call(bash('in-flight', 'echo in flight'))
-    await fake.clock.settle()
+    await fake.settle()
     await $.session.end(sessionEnd(fake.session))
     fake.holdAppend = undefined
     release()
-    await fake.clock.settle()
-    await fake.clock.advance(120_000)
+    await fake.settle()
+    await fake.advance(120_000)
     expect(fake.appendCalls).toBe(calls + 1)
     expect(fake.logs.slice(logs).some((log) => log.includes("Couldn't send") || log.includes('will be retried'))).toBe(false)
     expect(fake.statuses.some((status) => status?.includes('will be retried'))).toBe(false)
@@ -771,7 +771,7 @@ describe('recording', () => {
     expect(fake.exports).toBe(1)
     // Nothing remains pending: a later live row takes the next sequence.
     await $.tool.call(bash('after-replay', 'echo after replay'))
-    await fake.clock.settle()
+    await fake.settle()
     expect(fake.records().map((record) => record.sequence)).toEqual([1, 2, 3])
     fake.expectClean()
   })
@@ -782,12 +782,12 @@ describe('recording', () => {
     await fake.share($)
     fake.server.checkout = 'detached'
     await $.tool.call(bash('while-detached', 'echo queued'))
-    await fake.clock.settle()
+    await fake.settle()
     expectStagedRecords(fake, [2])
     fake.server.checkout = 'attached'
     // The pause is latched: reattachment alone does not restart delivery.
     await $.tool.call(bash('still-paused', 'echo queued'))
-    await fake.clock.settle()
+    await fake.settle()
     expectStagedRecords(fake, [2, 3])
     // A prompt verifies the checkout again, which lifts the pause that a failed check set.
     expect((await $.prompt.submit(prompt('after reattachment'))).drop).toBeUndefined()
@@ -806,7 +806,7 @@ describe('recording', () => {
     await $.session.start(sessionStart)
     fake.failRemoval = true
     await fake.share($)
-    await fake.clock.settle()
+    await fake.settle()
     const first = [...fake.files.keys()].filter((path) => /\/1-\d+\.json$/.test(path))
     expect(first.length).toBeGreaterThan(0)
     expect(first.every((path) => fake.files.has(path))).toBe(true)
@@ -818,7 +818,7 @@ describe('recording', () => {
     await $.tool.call(bash('pending', 'echo pending'))
     await $.session.end(sessionEnd(fake.session))
     await $.session.start(sessionStart)
-    await fake.clock.settle()
+    await fake.settle()
     const pending = [...fake.files.keys()].filter((path) => /\/2-\d+\.json$/.test(path))
     expect(first.some((path) => fake.files.has(path))).toBe(false)
     expect(pending.length).toBeGreaterThan(0)
@@ -834,11 +834,11 @@ describe('recording', () => {
     expect(fake.records().map((record) => record.sequence)).toEqual([1, 2])
     releaseListing()
     fake.holdListing = undefined
-    await fake.clock.settle()
+    await fake.settle()
     fake.failRemoval = false
     await $.session.end(sessionEnd(fake.session))
     await $.session.start(sessionStart)
-    await fake.clock.settle()
+    await fake.settle()
     expect([...fake.files.keys()]).toEqual([`${directory}/notes.json`])
     fake.expectClean()
   })
@@ -847,11 +847,11 @@ describe('recording', () => {
     const fake = fakeThreads(on, { messages: [userText('one')] })
     await $.session.start(sessionStart)
     await fake.share($)
-    await fake.clock.settle()
+    await fake.settle()
     // Staging succeeds; only saving the server's acknowledgment fails.
     fake.failStoreSet = () => fake.server.records.has(2)
     await $.tool.call(bash('unsaved-ack', 'echo row'))
-    await fake.clock.settle()
+    await fake.settle()
     expect(fake.records().map((record) => record.sequence)).toEqual([1, 2])
     const second = [...fake.files.keys()].filter((path) => /\/2-\d+\.json$/.test(path))
     expect(second.length).toBeGreaterThan(0)
@@ -863,11 +863,11 @@ describe('recording', () => {
     fake.failStoreSet = false
     await $.session.end(sessionEnd(fake.session))
     await $.session.start(sessionStart)
-    await fake.clock.settle()
+    await fake.settle()
     expect(fake.appendCalls).toBeGreaterThan(appendCalls)
     expect(fake.server.records.get(2)?.line + '\n').toBe(immutable)
     await $.tool.call(bash('after', 'echo after'))
-    await fake.clock.settle()
+    await fake.settle()
     expect(fake.records().map((record) => record.sequence)).toEqual([1, 2, 3])
     fake.expectClean()
   })
@@ -888,7 +888,7 @@ describe('native turns', () => {
       const rows: PendingRow[] = []
       let consumed = 0
       const receive = async () => {
-        await fake.clock.settle()
+        await fake.settle()
         const records = fake.updates().filter((record) => record.update?.toolCallId === 'remote-bash')
         for (const record of records.slice(consumed)) {
           expect(record.turnSequence).toBe(sequence)
@@ -948,7 +948,7 @@ describe('native turns', () => {
       } })
       expect((await view.nextRow())!.text).toContain('changed an earlier tool call echo output')
       await $.turn.complete(turnComplete('native-tool'))
-      await fake.clock.settle()
+      await fake.settle()
       fake.expectClean()
     })
   }
@@ -964,11 +964,11 @@ describe('native turns', () => {
     let release!: () => void
     fake.holdAppend = new Promise<void>((resolve) => { release = resolve })
     const completion = $.turn.complete(turnComplete('native-first'))
-    await fake.clock.settle()
+    await fake.settle()
     expect(fake.finishes()).toEqual([])
     expect((await $.prompt.submit(prompt('next before idle replicates'))).drop).toBeUndefined()
     await $.turn.start(turnStart('native-second'))
-    await fake.clock.settle()
+    await fake.settle()
     fake.holdAppend = undefined
     release()
     await completion
@@ -979,7 +979,7 @@ describe('native turns', () => {
     expect(idle.sequence).toBeLessThan(second)
     expect((fake.store.get(`session:${fake.session}`) as any).execution).toMatchObject({ sequence: second })
     await $.turn.complete(turnComplete('native-second'))
-    await fake.clock.settle()
+    await fake.settle()
     expect(fake.logs.some((log) => log.includes('agent is working'))).toBe(false)
     fake.expectClean()
   })
@@ -989,21 +989,21 @@ describe('native turns', () => {
     await $.session.start(sessionStart)
     await fake.share($)
     fake.turn('running', ADA, 'remote-turn')
-    await fake.clock.settle()
+    await fake.settle()
     expect(await drawBandText($)).toContain("Ada's agent")
     expect((await $.prompt.submit(prompt('take over'))).drop).toBeUndefined()
     // Arriving after the prompt entered, this row would otherwise land inside the new turn.
     fake.upsert(remoteItem('Late remote note', { id: 'late' }))
-    await fake.clock.settle()
+    await fake.settle()
     expect(fake.rows).toEqual([])
     await $.turn.start(turnStart('native-takeover'))
-    await fake.clock.settle()
+    await fake.settle()
     // The start is staged and delivered like a native send; Delta's arbitration supersedes the remote turn.
     const [sequence] = fake.starts()
     expect(fake.records().find((record) => record.sequence === sequence)?.turnSequence).toBe(sequence)
     fake.live()!.frame(cliFixture('producerTurn', { sequence, status: 'running' }))
     fake.turn('running', { user_id: 'user-me', name: 'Me' }, `producer-turn-${sequence}`)
-    await fake.clock.settle()
+    await fake.settle()
     expect(fake.aborts).toEqual([])
     // The takeover returns the band to this session's own turn, which Claude's own spinner already
     // shows; no transcript notice is written.
@@ -1012,7 +1012,7 @@ describe('native turns', () => {
     expect(fake.logs.some((log) => log.includes('finished its turn') || log.startsWith('Me'))).toBe(false)
     expect(fake.rows).toEqual([])
     await $.turn.complete(turnComplete('native-takeover'))
-    await fake.clock.settle()
+    await fake.settle()
     // Completion releases the held row without awaiting its draw, so the host's redraw draws it.
     await drawReady($, fake)
     expectOfferedItems(fake, ['late'])
@@ -1026,9 +1026,9 @@ describe('native turns', () => {
     await fake.share($)
     await $.prompt.submit(prompt('last turn before exit'))
     await $.turn.start(turnStart('native-last'))
-    await fake.clock.settle()
+    await fake.settle()
     await $.turn.complete(turnComplete('native-last'))
-    await fake.clock.settle()
+    await fake.settle()
     // The hook awaited delivery, so the idle finish reached the thread before it returned and a
     // host that exits now has still delivered it.
     expect(fake.finishes()).toEqual(fake.starts())
@@ -1052,14 +1052,14 @@ describe('native turns', () => {
     fake.holdAppend = new Promise<void>((resolve) => { release = resolve })
     let returned = false
     const completion = $.turn.complete(turnComplete('native-a')).then(() => { returned = true })
-    await fake.clock.settle()
+    await fake.settle()
     // The hook waits for its finish within the budget before giving up on the append.
     expect(returned).toBe(false)
     // The next turn starts and produces output while that delivery is still held.
     expect((await $.prompt.submit(prompt('second'))).drop).toBeUndefined()
     await $.turn.start(turnStart('native-b', 'second'))
     await $.tool.call(bash('tool-b', 'echo b'))
-    await fake.clock.settle()
+    await fake.settle()
     // Delivery is still held, so read the durable outbox: the next turn's start and its output are
     // already recorded and correlated, and the held finish is still queued behind them.
     const { pending } = fake.store.get(`session:${fake.session}`) as { pending: { files: string[] }[] }
@@ -1071,12 +1071,12 @@ describe('native turns', () => {
     expect(tapped.turnSequence).toBe(startB.sequence)
     expect(staged.some((record) => record.update?.state === 'idle' && record.turnSequence === first)).toBe(true)
     // Past the budget the hook returns and the outbox keeps draining in the background.
-    await fake.clock.advance(5_001)
-    await fake.clock.settle()
+    await fake.advance(5_001)
+    await fake.settle()
     expect(returned).toBe(true)
     release()
     await completion
-    await fake.clock.settle()
+    await fake.settle()
     expect(fake.finishes()).toEqual([first])
     fake.expectClean()
   })
@@ -1101,9 +1101,9 @@ describe('native turns', () => {
       return held
     }
     const starting = $.turn.start(turnStart('native-b', 'second'))
-    await fake.clock.settle()
+    await fake.settle()
     const tool = $.tool.call(bash('tool-b', 'echo b'))
-    await fake.clock.settle()
+    await fake.settle()
     // Nothing is recorded yet: the row waits for its own turn instead of naming the finished one.
     expect(fake.updates().some((record) => JSON.stringify(record).includes('tool-b'))).toBe(false)
     releaseStore()
@@ -1115,7 +1115,7 @@ describe('native turns', () => {
     expect(tapped.turnSequence).toBe(second)
     expect(second).toBeGreaterThan(first)
     await $.turn.complete(turnComplete('native-b'))
-    await fake.clock.settle()
+    await fake.settle()
     expect(fake.finishes()).toEqual([first, second])
     fake.expectClean()
   })
@@ -1142,7 +1142,7 @@ describe('native turns', () => {
       ] } } as never)
     await $.tool.call({ ...bash('tool-child', 'echo child'), agentId: 'child-agent' } as never)
     await $.tool.call(bash('tool-main', 'echo main'))
-    await fake.clock.settle()
+    await fake.settle()
     expect(fake.starts()).toEqual([first, second])
     expect(JSON.stringify(fake.records())).not.toContain('child output')
     expect(JSON.stringify(fake.records())).not.toContain('tool-child')
@@ -1151,12 +1151,12 @@ describe('native turns', () => {
       .toBe(second)
     await $.turn.complete({ ...turnComplete('native-new'), agentId: 'subagent' })
     await $.turn.complete(turnComplete('native-old'))
-    await fake.clock.settle()
+    await fake.settle()
     expect(fake.finishes()).toEqual([first])
     expect((fake.store.get(`session:${fake.session}`) as any).execution)
       .toMatchObject({ sequence: second, turnId: 'native-new' })
     await $.turn.complete(turnComplete('native-new'))
-    await fake.clock.settle()
+    await fake.settle()
     expect(fake.finishes()).toEqual([first, second])
     fake.expectClean()
   })
@@ -1170,9 +1170,9 @@ describe('native turns', () => {
       ['answer', 'end_turn'], ['aborted', 'cancelled'], ['refusal', 'refusal'], ['error', 'error'],
     ] as const) {
       await $.turn.start(turnStart(reason))
-      await fake.clock.settle()
+      await fake.settle()
       await $.turn.complete({ ...turnComplete(reason), reason, isAborted: reason === 'aborted' } as never)
-      await fake.clock.settle()
+      await fake.settle()
       const start = fake.records().find((record) => record.sequence === fake.starts().at(-1))
       expect(start?.update).toEqual({
         sessionUpdate: 'state_update', state: 'running',
@@ -1187,16 +1187,16 @@ describe('native turns', () => {
       })
     }
     await $.turn.start(turnStart('interrupted'))
-    await fake.clock.settle()
+    await fake.settle()
     await $.turn.start(turnStart('replacement'))
-    await fake.clock.settle()
+    await fake.settle()
     const recovered = fake.records().find((record) =>
       record.update?.sessionUpdate === 'state_update' && record.update.state === 'idle' &&
       record.turnSequence === fake.starts().at(-2))
     expect(recovered?.update).toEqual({ sessionUpdate: 'state_update', state: 'idle' })
     fake.pluginVersion = '/private-version'
     await $.turn.start(turnStart('unknown-version'))
-    await fake.clock.settle()
+    await fake.settle()
     const unknown = fake.records().find((record) => record.sequence === fake.starts().at(-1))
     expect(unknown?.update).toEqual({ sessionUpdate: 'state_update', state: 'running' })
     for (const operation of ['create', 'share', 'append']) {
@@ -1215,7 +1215,7 @@ describe('native turns', () => {
       await $.session.start(sessionStart)
       await fake.share($)
       await $.turn.start(turnStart('host-context'))
-      await fake.clock.settle()
+      await fake.settle()
       const start = fake.records().find((record) => record.sequence === fake.starts().at(-1))
       expect(start?.update).toEqual({
         sessionUpdate: 'state_update', state: 'running',
@@ -1236,7 +1236,7 @@ describe('native turns', () => {
       if (failure === 'write') fake.failWrite = true
       else fake.failStoreSet = true
       await $.turn.start(turnStart('native-unsaved'))
-      await fake.clock.settle()
+      await fake.settle()
       expect(fake.aborts).toEqual(['native-unsaved'])
       expect(fake.starts()).toEqual([])
       expect((fake.store.get(`session:${fake.session}`) as any).next).toBe(1)
@@ -1250,10 +1250,10 @@ describe('native turns', () => {
     await fake.share($)
     await $.prompt.submit(prompt('capture'))
     await $.turn.start(turnStart('native-capture'))
-    await fake.clock.settle()
+    await fake.settle()
     fake.failStoreSet = true
     await $.tool.call(bash('failed-capture', 'echo captured'))
-    await fake.clock.settle()
+    await fake.settle()
     expect(fake.aborts).toEqual(['native-capture'])
     expect((await $.prompt.submit(prompt('blocked'))).drop).toBeDefined()
     fake.expectClean()
@@ -1268,7 +1268,7 @@ describe('native turns', () => {
       { schemaVersion: 1, sequence: 1, turnSequence: 1, update: { sessionUpdate: 'state_update', state: 'running' } },
     ], { sequence: 1, turnId: 'old-process-id' })
     await $.session.start(sessionStart)
-    await fake.clock.settle()
+    await fake.settle()
     expect(fake.starts()).toEqual([1])
     expect(fake.finishes()).toEqual([1])
     expect(fake.aborts).toEqual([])
@@ -1286,7 +1286,7 @@ describe('native turns', () => {
     } })
     expect((await $.prompt.submit(prompt('no receipt needed'))).drop).toBeUndefined()
     await $.turn.start(turnStart('native-pending'))
-    await fake.clock.settle()
+    await fake.settle()
     let saved = fake.store.get(`session:${fake.session}`) as any
     expect(saved.execution).toMatchObject({ sequence: 1, turnId: 'native-pending' })
     expect(saved.pending.map((entry: any) => entry.sequence)).toEqual([1])
@@ -1294,11 +1294,11 @@ describe('native turns', () => {
     const immutable = fake.files.get(file)
     expect(fake.entered).toHaveLength(1)
     await $.turn.complete(turnComplete('native-pending'))
-    await fake.clock.settle()
+    await fake.settle()
     expect(fake.files.get(file)).toBe(immutable)
     fake.appendOffline = false
     await fake.share($)
-    await fake.clock.settle()
+    await fake.settle()
     saved = fake.store.get(`session:${fake.session}`) as any
     expect(saved.pending).toEqual([])
     expect(saved.execution).toBeUndefined()
@@ -1313,10 +1313,10 @@ describe('native turns', () => {
     await fake.share($)
     await $.prompt.submit(prompt('owned'))
     await $.turn.start(turnStart('native-wrong-end', 'owned'))
-    await fake.clock.settle()
+    await fake.settle()
     fake.appendFaults.push({ ack: (ack) => ({ ...ack, operation: 'turn_ended' }) })
     await $.turn.complete(turnComplete('native-wrong-end'))
-    await fake.clock.settle()
+    await fake.settle()
     let saved = fake.store.get(`session:${fake.session}`) as any
     expect(saved.execution).toBeUndefined()
     expect(saved.pending.map((entry: any) => entry.sequence)).toEqual([2])
@@ -1325,12 +1325,12 @@ describe('native turns', () => {
     fake.failStoreSet = () => (fake.store.get(`session:${fake.session}`) as any).pending.length === 1
     await $.session.end(sessionEnd(fake.session))
     await $.session.start(sessionStart)
-    await fake.clock.settle()
+    await fake.settle()
     expect(fake.files.get(file)).toBe(immutable)
     expect((fake.store.get(`session:${fake.session}`) as any).pending).toHaveLength(1)
     fake.failStoreSet = false
     await fake.share($)
-    await fake.clock.settle()
+    await fake.settle()
     saved = fake.store.get(`session:${fake.session}`) as any
     expect(saved.execution).toBeUndefined()
     expect(saved.pending).toEqual([])
@@ -1352,7 +1352,7 @@ describe('native turns', () => {
     delete before.endedAt
     const files = [...fake.files]
     await $.session.start(sessionStart)
-    await fake.clock.settle()
+    await fake.settle()
     expect(fake.store.get(`session:${fake.session}`)).toEqual(before)
     expect([...fake.files]).toEqual(files)
     expect(fake.records()).toEqual([])
@@ -1388,10 +1388,10 @@ describe('native turns', () => {
     await $.tool.call(bash('tool-1', 'make'))
     await $.tool.call(bash('tool-2', 'make test'))
     await $.turn.complete(turnComplete('native-1'))
-    await fake.clock.settle()
+    await fake.settle()
     fake.appendOffline = false
     await fake.share($)
-    await fake.clock.settle()
+    await fake.settle()
 
     const records = fake.records()
     const output = records.filter((record) => record.update?.sessionUpdate === 'tool_call_update')
@@ -1412,7 +1412,7 @@ describe('native turns', () => {
     expect((await $.prompt.submit(prompt('raced'))).drop).toBeUndefined()
     fake.appendFaults.push({ disposition: 'fenced', frames: [cliFixture('producerTurn', { sequence: 2, status: 'superseded' })] })
     await $.turn.start(turnStart('native-raced'))
-    await fake.clock.settle()
+    await fake.settle()
     const [sequence] = fake.starts()
     expect(fake.records().find((record) => record.sequence === sequence)?.turnSequence).toBe(sequence)
     expect(fake.aborts).toEqual(['native-raced'])
@@ -1420,7 +1420,7 @@ describe('native turns', () => {
     fake.releaseRemote()
     fake.refusePrompt = 'another hook refused'
     expect((await $.prompt.submit(prompt('refused below'))).drop).toBe('another hook refused')
-    await fake.clock.settle()
+    await fake.settle()
     expect(fake.starts()).toEqual([sequence])
     fake.expectClean()
   })
@@ -1436,14 +1436,14 @@ describe('native turns', () => {
     const sequence = fake.starts()[0]!
     // A stale event for another turn is not this turn's loss.
     fake.live()!.frame({ type: 'producer.turn', sequence: sequence + 100, status: 'superseded' })
-    await fake.clock.settle()
+    await fake.settle()
     expect(fake.aborts).toEqual([])
     fake.supersede()
-    await fake.clock.settle()
+    await fake.settle()
     expect(fake.aborts).toEqual(['native-lost'])
     await $.tool.call(bash('after-loss', 'echo written after loss'))
     await $.turn.complete(turnComplete('native-lost', 'aborted'))
-    await fake.clock.settle()
+    await fake.settle()
     expect(fake.aborts).toEqual(['native-lost'])
     for (const record of fake.updates().filter((record) => record.sequence > sequence))
       expect(record.turnSequence).toBe(sequence)
@@ -1462,13 +1462,13 @@ describe('native turns', () => {
     // Delta already superseded this turn, so the next record we send comes back fenced.
     fake.appendFaults.push({ disposition: 'fenced' })
     await $.tool.call(bash('late', 'echo contested'))
-    await fake.clock.settle()
+    await fake.settle()
     expect(fake.aborts).toEqual(['native-fenced'])
     expect(fake.logs.filter((log) => log.includes('stopped Claude turn native-fenced'))).toHaveLength(1)
     expect((fake.store.get(`session:${fake.session}`) as any).execution).toBeUndefined()
     // The stop still writes the turn's finish once the abort completes.
     await $.turn.complete(turnComplete('native-fenced', 'aborted'))
-    await fake.clock.settle()
+    await fake.settle()
     expect(fake.aborts).toEqual(['native-fenced'])
     expect(fake.finishes()).toContain(sequence)
     fake.expectClean()
@@ -1485,9 +1485,9 @@ describe('native turns', () => {
     let releaseTool!: () => void
     fake.holdTool = new Promise<void>((resolve) => { releaseTool = resolve })
     const tool = $.tool.call(bash('slow-tool', 'sleep'))
-    await fake.clock.settle()
+    await fake.settle()
     fake.supersede()
-    await fake.clock.settle()
+    await fake.settle()
     expect(fake.aborts).toEqual(['native-earlier'])
     await $.turn.complete(turnComplete('native-earlier', 'aborted'))
     fake.releaseRemote()
@@ -1501,13 +1501,13 @@ describe('native turns', () => {
     fake.appendFaults.push({ disposition: 'fenced' })
     releaseTool()
     await tool
-    await fake.clock.settle()
+    await fake.settle()
     const late = fake.updates().filter((record) => JSON.stringify(record).includes('slow-tool'))
     expect(late.every((record) => record.turnSequence === first)).toBe(true)
     expect(fake.aborts).toEqual(['native-earlier'])
     expect((fake.store.get(`session:${fake.session}`) as any).execution).toMatchObject({ sequence: second, turnId: 'native-later' })
     await $.turn.complete(turnComplete('native-later'))
-    await fake.clock.settle()
+    await fake.settle()
     expect(fake.finishes()).toContain(second)
     fake.expectClean()
   })
@@ -1524,14 +1524,14 @@ describe('native turns', () => {
     fake.appendFaults.push({ disposition: 'fenced' })
     const tool = $.tool.call(bash('late', 'echo contested'))
     fake.supersede()
-    await fake.clock.settle()
+    await fake.settle()
     await tool
-    await fake.clock.settle()
+    await fake.settle()
     expect(fake.aborts).toEqual(['native-contested'])
     expect(fake.logs.filter((log) => log.includes('stopped Claude turn native-contested'))).toHaveLength(1)
     expect(fake.finishes()).toContain(sequence)
     await $.turn.complete(turnComplete('native-contested', 'aborted'))
-    await fake.clock.settle()
+    await fake.settle()
     expect(fake.aborts).toEqual(['native-contested'])
     fake.expectClean()
   })
@@ -1542,7 +1542,7 @@ describe('native turns', () => {
     await fake.share($)
     await $.prompt.submit(prompt('owned'))
     await $.turn.start(turnStart('native-queued-loss', 'owned'))
-    await fake.clock.settle()
+    await fake.settle()
     let entered!: () => void
     const waiting = new Promise<void>((resolve) => { entered = resolve })
     let release!: () => void
@@ -1559,7 +1559,7 @@ describe('native turns', () => {
     const restarting = $.session.start(sessionStart)
     release()
     await restarting
-    await fake.clock.settle()
+    await fake.settle()
     expect(fake.aborts).toEqual([])
     expect((fake.store.get(`session:${fake.session}`) as any).execution).toBeUndefined()
     expect(fake.finishes()).toEqual(fake.starts())
@@ -1580,10 +1580,10 @@ describe('native turns', () => {
     let releaseTool!: () => void
     fake.holdTool = new Promise<void>((resolve) => { releaseTool = resolve })
     const tool = $.tool.call(bash('straggler', 'sleep'))
-    await fake.clock.settle()
+    await fake.settle()
     fake.holdTool = undefined
     await $.turn.complete(turnComplete('native-done'))
-    await fake.clock.settle()
+    await fake.settle()
     expect(fake.finishes()).toEqual([sequence])
     const settled = fake.updates().find((record) => JSON.stringify(record).includes('settled-tool'))!
     const end = fake.records().find((record) => record.update?.state === 'idle')!
@@ -1592,7 +1592,7 @@ describe('native turns', () => {
     expect((await $.prompt.submit(prompt('second'))).drop).toBeUndefined()
     releaseTool()
     await tool
-    await fake.clock.settle()
+    await fake.settle()
     const late = fake.updates().filter((record) => JSON.stringify(record).includes('straggler'))
     expect(late).toHaveLength(1)
     expect(late.every((record) => record.turnSequence === sequence)).toBe(true)
@@ -1610,9 +1610,9 @@ describe('native turns', () => {
     let releaseTool!: () => void
     fake.holdTool = new Promise<void>((resolve) => { releaseTool = resolve })
     const tool = $.tool.call(bash('slow-tool', 'sleep'))
-    await fake.clock.settle()
+    await fake.settle()
     fake.supersede()
-    await fake.clock.settle()
+    await fake.settle()
     expect(fake.aborts).toEqual(['native-a'])
     await $.turn.complete(turnComplete('native-a', 'aborted'))
     fake.releaseRemote()
@@ -1629,7 +1629,7 @@ describe('native turns', () => {
     expect(late.every((record) => record.turnSequence === first)).toBe(true)
     expect(fake.updates().some((record) => record.turnSequence === second && JSON.stringify(record).includes('slow-tool'))).toBe(false)
     await $.turn.complete(turnComplete('native-b'))
-    await fake.clock.settle()
+    await fake.settle()
     expect(fake.finishes()).toContain(second)
     expect(fake.aborts).toEqual(['native-a'])
     fake.expectClean()
@@ -1648,9 +1648,9 @@ describe('the watch', () => {
     const appends = fake.appendCalls
     const ledger = new Map(fake.server.records)
     await $.session.start(sessionStart)
-    await fake.clock.settle()
+    await fake.settle()
     await $.tool.call(bash('queued', 'echo queued while mismatched'))
-    await fake.clock.settle()
+    await fake.settle()
     expect(fake.appendCalls).toBe(appends)
     expect(fake.server.records).toEqual(ledger)
     expect(fake.exports).toBe(1)
@@ -1674,7 +1674,7 @@ describe('the watch', () => {
       error: { code: 'failed', reason: 'storage', message: 'Attachment storage cannot be read' } }
     fake.statusPatch = { worktrees }
     await $.tool.call(bash('inspection-pending', 'echo queued'))
-    await fake.clock.settle()
+    await fake.settle()
     const saved = structuredClone(fake.store.get(`session:${fake.session}`) as any)
     expect(saved).toMatchObject({
       thread: original.thread, checkout: original.checkout, checkoutReference: original.checkoutReference,
@@ -1688,7 +1688,7 @@ describe('the watch', () => {
     expect(fake.store.get(`session:${fake.session}`)).toEqual(saved)
     await $.session.end(sessionEnd(fake.session))
     await $.session.start(sessionStart)
-    await fake.clock.settle()
+    await fake.settle()
     expect((await $.prompt.submit(prompt('still unavailable'))).drop).toBeDefined()
     expect(fake.store.get(`session:${fake.session}`)).toEqual(saved)
     for (const [path, contents] of files) expect(fake.files.get(path)).toBe(contents)
@@ -1697,7 +1697,7 @@ describe('the watch', () => {
     await $.session.end(sessionEnd(fake.session))
     fake.statusPatch = undefined
     await $.session.start(sessionStart)
-    await fake.clock.settle()
+    await fake.settle()
     expect(fake.records()).toHaveLength(2)
     expect(fake.server.records.get(original.next)?.line + '\n').toBe([...files.values()].join(''))
     expect((fake.store.get(`session:${fake.session}`) as any).pending).toEqual([])
@@ -1712,7 +1712,7 @@ describe('the watch', () => {
     // acknowledged locally, and the checkout is checked again once the server answers.
     fake.commandFault = { operation: 'status', code: 'app_unavailable', message: 'Cannot reach Delta' }
     await $.tool.call(bash('while-offline', 'echo queued'))
-    await fake.clock.settle()
+    await fake.settle()
     expect(fake.records().map((record) => record.sequence)).toEqual([1, 2])
     expectStagedRecords(fake, [])
     fake.commandFault = undefined
@@ -1728,10 +1728,10 @@ describe('the watch', () => {
     // Fields the plugin does not read can still make the status larger than process.run captures.
     fake.statusPatch = { diagnostics: 'x'.repeat(4 * 1024 * 1024) }
     await $.session.start(sessionStart)
-    await fake.clock.settle()
+    await fake.settle()
     expect((await $.prompt.submit(prompt('large diagnostics'))).drop).toBeUndefined()
     await $.tool.call(bash('large-status', 'echo local'))
-    await fake.clock.settle()
+    await fake.settle()
     expect(fake.records()).toHaveLength(2)
     expect(fake.store.get(`session:${fake.session}`)).toMatchObject({
       thread: fake.threadId, checkoutReference: fake.server.mount!.reference, next: 3, pending: [],
@@ -1747,11 +1747,11 @@ describe('the watch', () => {
     // After the restart, every attempt fails before the watch is ready, so it is never live.
     fake.onWatch = (watch) => { watch.exit(1) }
     await $.session.start(sessionStart)
-    await fake.clock.settle()
+    await fake.settle()
     expect(await drawBandText($)).toContain(PENDING)
     expect(await drawBandText($)).not.toContain(LIVE)
-    await fake.clock.advance(1000)
-    await fake.clock.settle()
+    await fake.advance(1000)
+    await fake.settle()
     expect(await drawBandText($)).toContain(PENDING)
     expect(await drawBandText($)).not.toContain(LIVE)
     await $.session.end(sessionEnd(fake.session))
@@ -1773,39 +1773,39 @@ describe('the watch', () => {
     }
     const attempts = () => fake.watches.length - first
     await $.session.start(sessionStart)
-    await fake.clock.settle()
+    await fake.settle()
     expect(await drawBandText($)).toContain(LIVE)
     // The first watch went live before it dropped, so the band waits out its grace.
     fake.watches.at(-1)?.exit(1)
-    await fake.clock.settle()
+    await fake.settle()
     expect(await drawBandText($)).toContain(LIVE)
-    await fake.clock.advance(999)
+    await fake.advance(999)
     expect(attempts()).toBe(1)
-    await fake.clock.advance(1)
+    await fake.advance(1)
     expect(attempts()).toBe(2)
     expect(await drawBandText($)).toContain(LIVE)
     // A live watch that drops looks live through its grace, reconnecting attempts included.
     fake.watches.at(-1)?.exit(1)
-    await fake.clock.settle()
+    await fake.settle()
     expect(await drawBandText($)).toContain(LIVE)
     const before = attempts()
-    await fake.clock.advance(1999)
+    await fake.advance(1999)
     expect(attempts()).toBe(before)
-    await fake.clock.advance(1)
+    await fake.advance(1)
     expect(attempts()).toBeGreaterThan(before)
     expect(await drawBandText($)).toContain(LIVE)
     // Past the grace, counted from the drop, the band admits to reconnecting.
-    await fake.clock.advance(2000)
+    await fake.advance(2000)
     expect(await drawBandText($)).toContain(PENDING)
     const idle = fake.watches.at(-1)!
     expect(idle.closed).toBe(false)
     // Participation lasts as long as a watch, so every reconnection asks for it again.
     expect(fake.watches.slice(first).every((watch) => watch.argv.includes('--participate'))).toBe(true)
     await $.session.end(sessionEnd(fake.session))
-    await fake.clock.settle()
+    await fake.settle()
     expect(idle.closed).toBe(true)
     const ended = attempts()
-    await fake.clock.advance(120_000)
+    await fake.advance(120_000)
     expect(attempts()).toBe(ended)
     fake.expectClean()
   })
@@ -1831,7 +1831,7 @@ describe('the watch', () => {
     await $.session.end(sessionEnd(fake.session))
     release()
     await starting
-    await fake.clock.advance(60_000)
+    await fake.advance(60_000)
     expect(fake.watches.slice(before).filter((watch) => !watch.closed)).toEqual([])
     expect(fake.watches.length - before).toBe(0)
     fake.expectClean()
@@ -1861,7 +1861,7 @@ describe('the watch', () => {
     fake.holdCliResolution = undefined
     release()
     await starting
-    await fake.clock.settle()
+    await fake.settle()
     expect(fake.commands.slice(before)).toEqual([])
     expect(fake.watches.length).toBe(watches + (target === 'status' ? 1 : 0))
     expect(fake.watches.filter((watch) => !watch.closed)).toEqual([])
@@ -1874,9 +1874,9 @@ describe('the watch', () => {
     await fake.share($)
     const watches = fake.watches.length
     fake.live()!.frame({ error: { code, message: 'start a new watch', retryable: true } })
-    await fake.clock.settle()
+    await fake.settle()
     expect(fake.logs.some((log) => log.includes(code))).toBe(true)
-    await fake.clock.advance(1000)
+    await fake.advance(1000)
     expect(fake.watches.length).toBe(watches + 1)
     expect(fake.live()?.ready).toBe(true)
     expect((await $.prompt.submit(prompt('after reconnect'))).drop).toBeUndefined()
@@ -1888,9 +1888,9 @@ describe('the watch', () => {
     await $.session.start(sessionStart)
     await fake.share($)
     fake.live()!.frame({ error: { code: 'not_visible', reason: 'thread_gone', message: 'The thread was deleted', retryable: false } })
-    await fake.clock.settle()
+    await fake.settle()
     const watches = fake.watches.length
-    await fake.clock.advance(120_000)
+    await fake.advance(120_000)
     expect(fake.watches.length).toBe(watches)
     expect(fake.logs.some((log) => log.includes('not_visible (thread_gone)') && log.includes('/delta-share'))).toBe(true)
     expect(JSON.stringify(await $.ui.render(abovePrompt))).toContain('not_visible')
@@ -1905,9 +1905,9 @@ describe('the watch', () => {
     await $.session.start(sessionStart)
     await fake.share($)
     fake.live()!.frame({ error: { code, reason: code === 'failed' ? 'storage' : code, message: 'cannot continue', retryable: false } })
-    await fake.clock.settle()
+    await fake.settle()
     const watches = fake.watches.length
-    await fake.clock.advance(120_000)
+    await fake.advance(120_000)
     expect(fake.watches.length).toBe(watches)
     expect(JSON.stringify(await $.ui.render(abovePrompt))).toContain(code)
     // The pause stops delivery, not Claude: the prompt is accepted while the reason stays shown.
@@ -1921,8 +1921,8 @@ describe('the watch', () => {
     await fake.share($)
     const watches = fake.watches.length
     fake.live()!.frame({ error: { code: 'failed', reason: 'sync', message: 'synchronization stalled', retryable: true } })
-    await fake.clock.settle()
-    await fake.clock.advance(1000)
+    await fake.settle()
+    await fake.advance(1000)
     expect(fake.watches.length).toBe(watches + 1)
     expect(fake.live()?.ready).toBe(true)
     expect((await $.prompt.submit(prompt('after reconnect'))).drop).toBeUndefined()
@@ -1946,18 +1946,18 @@ describe('the watch', () => {
     fake.holdStatus = new Promise<void>((resolve) => { release = resolve })
     const commands = fake.operations().length
     const starting = $.session.start(sessionStart)
-    await fake.clock.settle()
+    await fake.settle()
     expect(fake.live()?.ready).toBe(true)
     expect(fake.statusProcesses.at(-1)!.closed).toBe(false)
     fake.upsert(remoteItem('Changed during inspection'))
     fake.live()!.frame({ type: 'producer.turn', sequence, status: 'superseded' })
-    await fake.clock.settle()
+    await fake.settle()
     expect((fake.store.get(`session:${fake.session}`) as any).execution).toBeUndefined()
     expect((fake.store.get(`session:${fake.session}`) as any).pending).not.toEqual([])
     fake.holdStatus = undefined
     release()
     await starting
-    await fake.clock.settle()
+    await fake.settle()
     expectNoSetupCommands(fake, commands)
     fake.expectClean()
   })
@@ -1976,7 +1976,7 @@ describe('the watch', () => {
     if (failure) fake.commandFault = { operation: 'status', code: 'unavailable', message: 'Old delayed inspection failure' }
     else fake.statusPatch = { url: 'https://delta.dev/join/old_inspection' }
     const starting = $.session.start(sessionStart)
-    await fake.clock.settle()
+    await fake.settle()
     expect(fake.statusProcesses.at(-1)!.closed).toBe(false)
     await $.session.end(sessionEnd(fake.session))
     await starting
@@ -1986,7 +1986,7 @@ describe('the watch', () => {
     fake.statusPatch = undefined
     await $.session.start(sessionStart)
     release()
-    await fake.clock.settle()
+    await fake.settle()
     expect(fake.store.get(`session:${fake.session}`)).toEqual(saved)
     expect(JSON.stringify(await $.ui.render(abovePrompt))).toContain(LIVE)
     expect((await $.prompt.submit(prompt('after inspection restart'))).drop).toBeUndefined()
@@ -2005,7 +2005,7 @@ describe('remote activity', () => {
     fake.server.items.set(created.id, created)
     await $.session.start(sessionStart)
     await fake.share($)
-    await fake.clock.settle()
+    await fake.settle()
     await drawReady($, fake)
     expectOfferedItems(fake, ['land-start'])
     const startTree = JSON.stringify(await $.ui.render(commandOutput('show land-start', '.')))
@@ -2017,7 +2017,7 @@ describe('remote activity', () => {
       id: 'land-end', kind: 'subthread_event',
       content: { text: 'Landed: Land Changes\nmain 2d867ce6c CI passed', thread_id: 'land-child', event: 'landed' },
     }))
-    await fake.clock.settle()
+    await fake.settle()
     await drawReady($, fake)
     expectOfferedItems(fake, ['land-start', 'land-end'])
     const endTree = JSON.stringify(await $.ui.render(commandOutput('show land-end', '.')))
@@ -2026,7 +2026,7 @@ describe('remote activity', () => {
     expect(JSON.stringify(fake.records())).not.toContain('land-child')
 
     fake.live()!.exit(1)
-    await fake.clock.advance(1000)
+    await fake.advance(1000)
     await drawReady($, fake)
     expectOfferedItems(fake, ['land-start', 'land-end'])
     fake.expectClean()
@@ -2044,7 +2044,7 @@ describe('remote activity', () => {
     ]) fake.server.items.set(item.id, item)
     await $.session.start(sessionStart)
     await fake.share($)
-    await fake.clock.settle()
+    await fake.settle()
     await drawReady($, fake)
     expectOfferedItems(fake, ['a', 'b'])
     // A message reaches the person and Claude through its command output row, not as a notice.
@@ -2065,15 +2065,15 @@ describe('remote activity', () => {
     const claude = { user_id: null, name: 'Claude' }
     fake.upsert(remoteItem('Working on', { id: 's', kind: 'agent_message', author: claude, open: true }))
     fake.stream('s', ' the parser')
-    await fake.clock.settle()
+    await fake.settle()
     await drawReady($, fake)
     expect(fake.rows).toEqual([])
     fake.upsert({ ...fake.server.items.get('s')!, content: { text: 'Working on the parser. Done.' }, open: false })
-    await fake.clock.settle()
+    await fake.settle()
     await drawReady($, fake)
     expectOfferedItems(fake, ['s'])
     fake.upsert(remoteItem('Can you check the tests?\nThey fail on CI.', { id: 'q' }))
-    await fake.clock.settle()
+    await fake.settle()
     await drawReady($, fake)
     expectOfferedItems(fake, ['s', 'q'])
     expect(fake.entered).toEqual([])
@@ -2094,12 +2094,12 @@ describe('remote activity', () => {
     fake.server.items.set('a', keep)
     fake.server.items.set('b', { ...change, content: { text: 'Changed while away' } })
     await $.session.start(sessionStart)
-    await fake.clock.settle()
+    await fake.settle()
     expect(fake.live()?.ready).toBe(true)
     expectOfferedItems(fake, ['b', 'c'])
     // Reconnecting sends the same snapshot again.
     fake.live()!.exit(1)
-    await fake.clock.advance(1000)
+    await fake.advance(1000)
     expect(fake.live()?.ready).toBe(true)
     expect(fake.rows.filter((row) => row.includes('item a'))).toEqual([])
     fake.expectClean()
@@ -2112,11 +2112,11 @@ describe('remote activity', () => {
     const claude = { user_id: null, name: 'Claude' }
     fake.upsert(remoteItem('Weighing', { id: 'thought', kind: 'agent_thought', author: claude, open: true }))
     fake.stream('thought', ' two approaches\nso far')
-    await fake.clock.settle()
+    await fake.settle()
     fake.upsert({ ...fake.server.items.get('thought')!, open: false })
     // A later re-send of the completed thought is not announced again.
     fake.upsert({ ...fake.server.items.get('thought')!, after_id: 'moved' })
-    await fake.clock.settle()
+    await fake.settle()
     // The person sees the whole thought, labelled, one entry per paragraph, and never Claude.
     expect(fake.logs.filter((log) => log === 'Claude (thinking)')).toHaveLength(1)
     expect(fake.logs.slice(-2)).toEqual(['Claude (thinking)', 'Weighing two approaches so far'])
@@ -2129,7 +2129,7 @@ describe('remote activity', () => {
     await $.session.start(sessionStart)
     await fake.share($)
     fake.upsert(remoteItem('# Title\n\nSecret body', { id: 'm' }))
-    await fake.clock.settle()
+    await fake.settle()
     const typed = await $.command.run(typedDelta('show m'))
     expect(typed.text).toContain('/delta')
     // Neither the plugin nor the test host answers an item id the person typed.
@@ -2143,7 +2143,7 @@ describe('remote activity', () => {
     await $.session.start(sessionStart)
     await fake.share($)
     fake.upsert(remoteItem('# Title\n\n**bold** and `code`', { id: 'm' }))
-    await fake.clock.settle()
+    await fake.settle()
     await drawReady($, fake)
     const tree = JSON.stringify(await $.ui.render(commandOutput('show m', 'delta: what the engine prefixes')))
     expect(tree).toContain('"Ada"')
@@ -2155,7 +2155,7 @@ describe('remote activity', () => {
     expect(tree).not.toContain('what the engine prefixes')
     // Another agent's message is labelled apart from a person's, its author in the color the band gives them.
     fake.upsert(remoteItem('Reply', { id: 'r', kind: 'agent_message', author: { user_id: null, name: 'Claude' } }))
-    await fake.clock.settle()
+    await fake.settle()
     await drawReady($, fake)
     const agent = JSON.stringify(await $.ui.render(commandOutput('show r', 'x')))
     expect(agent).toContain('"Claude"')
@@ -2171,7 +2171,7 @@ describe('remote activity', () => {
     const before = fake.logs.length
     fake.upsert(remoteItem('', { id: 't', kind: 'tool_call', author: { user_id: null, name: 'Delta agent' },
       content: { name: 'Bash', status: 'failed', rawInput: { command: 'head -40 README.md\n  && ls' } } }))
-    await fake.clock.settle()
+    await fake.settle()
     await drawReady($, fake)
     // Nothing about it reaches the transcript as a plugin notice.
     expect(fake.logs.slice(before).filter((log) => log.includes('Bash'))).toEqual([])
@@ -2188,7 +2188,7 @@ describe('remote activity', () => {
     // Stored command rows for removed messages and tools draw nothing, unlike unknown IDs.
     for (const id of ['m', 't']) {
       fake.remove(id)
-      await fake.clock.settle()
+      await fake.settle()
       const removed = await $.ui.render(commandOutput(`show ${id}`, '.'))
       expect(removed).toMatchObject({ type: 'Box' })
       const serialized = JSON.stringify(removed)
@@ -2204,7 +2204,7 @@ describe('remote activity', () => {
     await $.session.start(sessionStart)
     await fake.share($)
     fake.upsert(remoteItem('Please rename the flag.', { id: 'a' }))
-    await fake.clock.settle()
+    await fake.settle()
     await drawReady($, fake)
     expectOfferedItems(fake, ['a'])
     // The engine stores the run's rows once it answers, and this plugin neutralizes its own as they
@@ -2237,7 +2237,7 @@ describe('remote activity', () => {
     await $.session.start(sessionStart)
     await fake.share($)
     fake.upsert(remoteItem('Please rename the flag.', { id: 'a' }))
-    await fake.clock.settle()
+    await fake.settle()
     await drawReady($, fake)
     expectOfferedItems(fake, ['a'])
     // The echo of the plugin's own run stores nothing, though its arguments were already gone.
@@ -2259,12 +2259,12 @@ describe('remote activity', () => {
     await $.session.start(sessionStart)
     await fake.share($)
     fake.upsert(remoteItem('Please rename the flag.', { id: 'a' }))
-    await fake.clock.settle()
+    await fake.settle()
     await drawReady($, fake)
     // As the prompt queue stores a run it replayed: its echo carries no arguments either.
     fake.showRuns = 'queued'
     fake.upsert(remoteItem('And the docs.', { id: 'b' }))
-    await fake.clock.settle()
+    await fake.settle()
     await drawReady($, fake)
     expectOfferedItems(fake, ['a', 'b'])
     // Desktop draws each stored echo as a user row reading the engine's words for an empty row.
@@ -2280,11 +2280,11 @@ describe('remote activity', () => {
     await $.session.start(sessionStart)
     await fake.share($)
     fake.upsert(remoteItem('Please rename the flag.', { id: 'a' }))
-    await fake.clock.settle()
+    await fake.settle()
     await drawReady($, fake)
     expect(fake.stored).toEqual([])
-    await fake.clock.advance(2000)
-    await fake.clock.settle()
+    await fake.advance(2000)
+    await fake.settle()
     expect(fake.logs).toContain('Please rename the flag.')
     expectOfferedItems(fake, ['a'])
     expect(fake.stored.at(-1)).toMatchObject({ door: 'note',
@@ -2304,7 +2304,7 @@ describe('remote activity', () => {
     } }))
     fake.comment(remoteComment('Agreed.', { id: 'r', chain: 'c', after_id: 'c', delivered_with: 'm', target: null,
       author: { user_id: 'user-bob', name: 'Bob' } }))
-    await fake.clock.settle()
+    await fake.settle()
     await drawReady($, fake)
     // Claude reads one row per comment and none for the message that only carried them.
     expect(fake.rows).toEqual(['[Delta] Ada, comment (comment c):', '[Delta] Bob, reply to a comment (comment r):'])
@@ -2321,7 +2321,7 @@ describe('remote activity', () => {
     expect(drawnComment).not.toContain('6 + three')
     // A withdrawn comment corrects Claude's row, and its stored command row draws nothing.
     fake.removeComment('c')
-    await fake.clock.settle()
+    await fake.settle()
     await drawReady($, fake)
     expect(fake.rows).toHaveLength(3)
     expect(JSON.stringify(await $.ui.render(commandOutput('show comment:c', '.')))).not.toContain('Text')
@@ -2345,7 +2345,7 @@ describe('remote activity', () => {
     fake.upsert(remoteItem('', { id: 'b', kind: 'agent_message', author: agent }))
     fake.comment(remoteComment('I meant you.', { id: 'r', chain: 'c', after_id: 'c', delivered_with: 'm',
       target: null, agent: true, author: agent }))
-    await fake.clock.settle()
+    await fake.settle()
     await drawReady($, fake)
     expect(fake.rows).toEqual([
       '[Delta] Ada, user message (item q):',
@@ -2372,14 +2372,14 @@ describe('remote activity', () => {
     fake.server.comments.set('c', remoteComment('Why this?', { id: 'c', delivered_with: 'm' }))
     await $.session.start(sessionStart)
     await fake.share($)
-    await fake.clock.settle()
+    await fake.settle()
     await drawReady($, fake)
     expect(fake.rows).toHaveLength(2)
     expect(fake.rows[0]).toContain('(item m)')
     expect(fake.rows[1]).toContain('(comment c)')
     // Reconnecting sends the same snapshot again, which adds nothing.
     fake.live()!.exit(1)
-    await fake.clock.advance(1000)
+    await fake.advance(1000)
     await drawReady($, fake)
     expect(fake.rows).toHaveLength(2)
     fake.expectClean()
@@ -2392,16 +2392,16 @@ describe('remote activity', () => {
     // The prompt has entered and its turn has not finished, so rows are held.
     expect((await $.prompt.submit(prompt('mine'))).drop).toBeUndefined()
     fake.upsert(remoteItem('Remote while busy', { id: 'b' }))
-    await fake.clock.settle()
+    await fake.settle()
     await drawBandText($)
     expect(fake.rows).toEqual([])
     await $.turn.start(turnStart('turn-1', 'mine'))
-    await fake.clock.settle()
+    await fake.settle()
     await drawBandText($)
     expect(fake.rows).toEqual([])
     // The turn's end releases the held row, and the host's redraw is what draws it.
     const completing = $.turn.complete(turnComplete('turn-1'))
-    await fake.clock.settle()
+    await fake.settle()
     await drawReady($, fake)
     await completing
     expectOfferedItems(fake, ['b'])
@@ -2413,10 +2413,10 @@ describe('remote activity', () => {
     await $.session.start(sessionStart)
     await fake.share($)
     fake.upsert(remoteItem('Hello there', { id: 'f' }))
-    await fake.clock.settle()
+    await fake.settle()
     // No redraw ever came, so the item is shown the plain way and the row is offered to Claude.
-    await fake.clock.advance(2_001)
-    await fake.clock.settle()
+    await fake.advance(2_001)
+    await fake.settle()
     expect(fake.logs).toEqual(['Ada:', 'Hello there'])
     expect(fake.stored.map((row) => row.content)).toEqual([
       [{ type: 'text', text: '[Delta] Ada, user message (item f):\nHello there' }],
@@ -2430,16 +2430,16 @@ describe('remote activity', () => {
     await fake.share($)
     await $.prompt.submit(prompt('local turn'))
     await $.turn.start(turnStart('native-owned'))
-    await fake.clock.settle()
+    await fake.settle()
     fake.live()!.frame({ type: 'producer.turn', sequence: fake.starts()[0]! + 100, status: 'superseded' })
-    await fake.clock.settle()
+    await fake.settle()
     expect(fake.aborts).toEqual([])
     if (loss === 'supersession') {
       fake.supersede()
-      while (!(await drawBandText($)).includes("Ada's agent")) await fake.clock.settle()
+      while (!(await drawBandText($)).includes("Ada's agent")) await fake.settle()
       fake.upsert(remoteItem('Taking over: stop that', { id: 'takeover' }))
     } else fake.live()!.exit(1)
-    await fake.clock.settle()
+    await fake.settle()
     expect(fake.aborts).toEqual(['native-owned'])
     // A row added now would land inside the aborted turn.
     expect(fake.rows).toEqual([])
@@ -2448,7 +2448,7 @@ describe('remote activity', () => {
       expect(fake.logs.some((log) => log.startsWith('Connection interrupted'))).toBe(true)
     }
     await $.turn.complete(turnComplete('native-owned', 'aborted'))
-    await fake.clock.settle()
+    await fake.settle()
     // The hook returns before the released rows are drawn; the host's redraw is what draws them.
     await drawReady($, fake)
     expectOfferedItems(fake, loss === 'supersession' ? ['takeover'] : [])
@@ -2460,15 +2460,15 @@ describe('remote activity', () => {
     const fake = fakeThreads(on, { messages: [userText('one')] })
     await $.session.start(sessionStart)
     await fake.share($)
-    await fake.clock.settle()
+    await fake.settle()
     const records = fake.records().length
     const line = JSON.stringify({ type: 'item', item: remoteItem('complete response', { kind: 'agent_message' }) }) + '\n'
     const live = fake.live()!
     live.write(line.slice(0, 20))
     live.write(line.slice(20))
-    await fake.clock.settle()
+    await fake.settle()
     live.exit(2)
-    await fake.clock.settle()
+    await fake.settle()
     expect(fake.logs.some((log) => log.startsWith('Connection interrupted'))).toBe(true)
     expect(JSON.stringify(await $.ui.render(abovePrompt))).not.toContain('complete response')
     expect(fake.entered).toEqual([])
@@ -2486,36 +2486,36 @@ describe('the status band', () => {
     ]
     await $.session.start(sessionStart)
     await fake.share($)
-    await fake.clock.settle()
+    await fake.settle()
     expect(await drawBandText($)).toContain('queued')
     fake.child({ thread_id: 'child-one', reference: 'thread#s=child-one', kind: 'subagent', name: 'Scout', status: 'running' })
-    await fake.clock.settle()
+    await fake.settle()
     expect(await drawBandText($)).toContain('running')
     expect(await drawBandText($)).not.toContain('inactive')
     expect(await drawBandText($)).not.toContain('queued')
     fake.child({ thread_id: 'new-child', reference: 'thread#s=new-child', kind: 'future_kind', name: 'New', status: 'running' })
-    await fake.clock.settle()
+    await fake.settle()
     expect(await drawBandText($)).toContain('+1 running')
     fake.removeChild('child-one')
-    await fake.clock.settle()
+    await fake.settle()
     expect(await drawBandText($)).not.toContain('Scout')
     expect(await drawBandText($)).toContain('New')
     fake.live()!.exit(1)
-    await fake.clock.settle()
+    await fake.settle()
     expect(await drawBandText($)).toContain('unknown')
     let releaseChildren!: () => void
     fake.holdChildren = new Promise<void>((resolve) => { releaseChildren = resolve })
     fake.server.children = [{ thread_id: 'child-two', reference: 'thread#s=child-two', kind: 'subthread', name: 'Review', status: 'failed' }]
-    await fake.clock.advance(1000)
+    await fake.advance(1000)
     // Readiness clears the previous connection's inventory even when discovery is delayed.
     expect(await drawBandText($)).not.toContain('New')
     expect(await drawBandText($)).not.toContain('Review')
     releaseChildren()
     fake.holdChildren = undefined
-    await fake.clock.settle()
+    await fake.settle()
     expect(await drawBandText($)).toContain('failed')
     fake.removeChild('child-two')
-    await fake.clock.settle()
+    await fake.settle()
     expect(await drawBandText($)).not.toContain('Review')
     expect(fake.starts()).toEqual([])
     fake.expectClean()
@@ -2528,37 +2528,37 @@ describe('the status band', () => {
     expect(await drawBandText($)).not.toContain('⠋')
 
     fake.turn('running', { user_id: 'user-bob', name: 'Bob' }, 'spin')
-    await fake.clock.settle()
+    await fake.settle()
     expect(await drawBandText($)).toContain('⠋')
-    await fake.clock.advance(120)
+    await fake.advance(120)
     expect(await drawBandText($)).toContain('⠙')
     // While a turn runs, the animation's redraw is the only timer work.
     fake.invalidates = 0
-    await fake.clock.advance(120)
+    await fake.advance(120)
     expect(fake.invalidates).toBe(1)
 
     fake.turn('idle')
-    await fake.clock.settle()
+    await fake.settle()
     expect(await drawBandText($)).toContain(LIVE)
     fake.invalidates = 0
-    await fake.clock.advance(1200)
+    await fake.advance(1200)
     expect(fake.invalidates).toBe(0)
 
     // Teardown cancels the running turn's timer as well.
     fake.turn('running', { user_id: 'user-bob', name: 'Bob' }, 'spin-again')
-    await fake.clock.settle()
+    await fake.settle()
     await $.session.end(sessionEnd(fake.session))
-    await fake.clock.settle()
+    await fake.settle()
     // Teardown's own redraw is not the animation; after it, no timer ticks.
     fake.invalidates = 0
-    await fake.clock.advance(1200)
+    await fake.advance(1200)
     expect(fake.invalidates).toBe(0)
     // A finished share leaves a separate notice timer; teardown cancels that too.
     await $.session.start(sessionStart)
     await fake.share($)
     await $.session.end(sessionEnd(fake.session))
     fake.invalidates = 0
-    await fake.clock.advance(30_000)
+    await fake.advance(30_000)
     expect(fake.invalidates).toBe(0)
     fake.expectClean()
   })
@@ -2573,7 +2573,7 @@ describe('the status band', () => {
     // The band reports the running share even before the watch is up.
     expect(await drawBandText($)).toContain('Preparing to share')
     expect(fake.exports).toBe(0)
-    await fake.clock.advance(0)
+    await fake.advance(0)
     expect(fake.records()).toEqual([])
     const completed = fake.waitForShareLink()
     release()
@@ -2592,10 +2592,10 @@ describe('the status band', () => {
     // A prompt cannot start a turn while the share is in flight.
     expect((await $.prompt.submit(prompt('race the share'))).drop).toBeDefined()
     expect(fake.entered).toEqual([])
-    await fake.clock.settle()
+    await fake.settle()
     expect(await drawBandText($)).toContain('"color":"yellow"')
     release()
-    await fake.clock.settle()
+    await fake.settle()
     // Once the share is done, a prompt is accepted again.
     expect((await $.prompt.submit(prompt('after the share'))).drop).toBeUndefined()
     fake.expectClean()
@@ -2607,14 +2607,14 @@ describe('the status band', () => {
     await fake.share($)
     // The first report establishes the baseline; the arrival counts only after its debounce.
     fake.presence([])
-    await fake.clock.settle()
+    await fake.settle()
     fake.presence([{ user_id: 'user-bob', name: 'Bob Stone' }])
-    await fake.clock.settle()
+    await fake.settle()
     expect(await drawBandText($)).not.toContain('Bob')
-    await fake.clock.advance(3000)
+    await fake.advance(3000)
     expect(await drawBandText($)).toContain('"Bob"')
     fake.presence([])
-    await fake.clock.advance(5000)
+    await fake.advance(5000)
     expect(await drawBandText($)).not.toContain('Bob')
     fake.expectClean()
   })
@@ -2625,22 +2625,22 @@ describe('the status band', () => {
     await $.session.start(sessionStart)
     await fake.share($)
     fake.turn('running', ADA, 'remote-turn')
-    await fake.clock.settle()
+    await fake.settle()
     expect(await drawBandText($)).toContain("Ada's agent")
-    await fake.clock.advance(12_000)
+    await fake.advance(12_000)
     expect(await drawBandText($)).toContain('(12s)')
     // An item still open, such as a long command, keeps the turn working however long it is silent.
     fake.upsert(remoteItem('npm test', { id: 'long', open: true }))
-    await fake.clock.advance(31_000)
+    await fake.advance(31_000)
     expect(await drawBandText($)).not.toContain('quiet')
     // Its completion is activity too; 30s after it, with nothing open, the turn is quiet.
     fake.upsert(remoteItem('npm test', { id: 'long' }))
-    await fake.clock.advance(29_000)
+    await fake.advance(29_000)
     expect(await drawBandText($)).not.toContain('quiet')
-    await fake.clock.advance(2_000)
+    await fake.advance(2_000)
     expect(await drawBandText($)).toContain(' quiet 31s')
     fake.turn('idle')
-    await fake.clock.settle()
+    await fake.settle()
     expect(await drawBandText($)).not.toContain("Ada's agent")
     fake.expectClean()
   })
@@ -2655,26 +2655,26 @@ describe('the status band', () => {
       content: { toolCallId: id, title, status: open ? 'in_progress' : 'completed' },
     })
     fake.upsert(tool('quick', 'Read src/a.rs', true))
-    await fake.clock.advance(200)
+    await fake.advance(200)
     fake.upsert(tool('quick', 'Read src/a.rs', false))
     fake.upsert(tool('test', 'cargo test -p thread', true))
-    await fake.clock.advance(300)
+    await fake.advance(300)
     // A quick call never shows, and a slow one waits out the same half second, so bursts do not flicker.
     expect(await drawBandText($)).not.toContain('Read src/a.rs')
     expect(await drawBandText($)).not.toContain('cargo test')
-    await fake.clock.advance(12_000)
+    await fake.advance(12_000)
     expect(await drawBandText($)).toContain('cargo test -p thread')
     expect(await drawBandText($)).toContain('(12s)')
     fake.upsert(remoteItem('', { id: 'thought', kind: 'agent_thought', turn_id: 'remote-turn', open: true, content: { text: 'Hmm' } }))
-    await fake.clock.advance(600)
+    await fake.advance(600)
     expect(await drawBandText($)).toContain('thinking')
     fake.upsert(remoteItem('', { id: 'thought', kind: 'agent_thought', turn_id: 'remote-turn', content: { text: 'Hmm' } }))
     fake.upsert(tool('test', 'cargo test -p thread', false))
-    await fake.clock.settle()
+    await fake.settle()
     expect(await drawBandText($)).not.toContain('thinking')
     expect(await drawBandText($)).not.toContain('cargo test')
     fake.turn('idle')
-    await fake.clock.settle()
+    await fake.settle()
     fake.expectClean()
   })
 
@@ -2703,13 +2703,13 @@ describe('the status band', () => {
     expect((await terminal.find({ type: 'Link' }))?.props).toEqual({ href: link })
     await terminal.press({ key: 'copy' })
     expect(copied).toEqual([link])
-    await fake.clock.settle()
+    await fake.settle()
     expect(await drawBandText($)).toContain('✔ copied')
-    await fake.clock.advance(2000)
+    await fake.advance(2000)
     expect(await drawBandText($)).not.toContain('✔ copied')
     refuse = true
     await terminal.press({ key: 'copy' })
-    await fake.clock.settle()
+    await fake.settle()
     expect(await drawBandText($)).not.toContain('✔ copied')
     // The desktop's own card sets the band apart: no shade, and a link labelled with its short form.
     const desktop = await mount('desktop')
@@ -2805,7 +2805,7 @@ describe('the recording contract', () => {
     // An incompatible CLI is refused before anything is appended.
     fake.contractRange = { min: 8, max: 9 }
     await $.session.start(sessionStart)
-    await fake.clock.settle()
+    await fake.settle()
     expect(checksAtAppend).toEqual([])
     expect(fake.logs.join('\n')).toContain('Update the Delta plugin')
     await $.session.end(sessionEnd(fake.session))
@@ -2837,7 +2837,7 @@ describe('the recording contract', () => {
     }
     fake.contractRange = { min: 1, max: 4 }
     await $.session.start(sessionStart)
-    await fake.clock.settle()
+    await fake.settle()
     await $.session.end(sessionEnd(fake.session))
     fake.contractRange = undefined
     const checks = fake.contractChecks
@@ -2864,7 +2864,7 @@ describe('recording titles', () => {
       fake.files.set(transcript, [...(fake.files.get(transcript) ?? '').split('\n').filter(Boolean),
         ...lines.map((line) => JSON.stringify(line))].join('\n') + '\n')
       await $.classic.Stop({ transcript_path: transcript, stop_hook_active: false } as any)
-      await fake.clock.settle()
+      await fake.settle()
     }
     // No title yet: nothing is recorded.
     await stop({ type: 'user', message: { role: 'user', content: 'hello' } })
@@ -2895,7 +2895,7 @@ describe('recording titles', () => {
       record.update?.sessionUpdate === 'session_info_update' ? [record.update.title] : [])
     const stop = async (path = transcript) => {
       await $.classic.Stop({ transcript_path: path, stop_hook_active: false } as any)
-      await fake.clock.settle()
+      await fake.settle()
     }
     // Neither a missing transcript nor a missing reader pauses sharing or says anything.
     await stop('/config/projects/repo/missing.jsonl')

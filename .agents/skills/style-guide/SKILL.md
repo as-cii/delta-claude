@@ -92,8 +92,9 @@ writes when it loads this folder.
 - Test behaviour with the engine's test kit and `fakeThreads`, in the `describe` for its feature in
   `register.test.ts` or a feature's existing engine test file. Each test file runs in a process of its own that
   warms the plugin up again, so a new engine test file adds CPU that makes CI's timed tests flaky.
-- Wait for what a test checks with `fake.settleUntil(…)`. `clock.settle()` lets work run only within a short
-  real-time budget, which a loaded machine can outlast.
+- Let the plugin run with `fake.settle()` and `fake.advance(ms)`, which wait until it has gone quiet, not
+  `fake.clock.settle()` or `fake.clock.advance(ms)`, which a loaded machine can outlast. Wait for one specific
+  condition with `fake.settleUntil(…)`.
 - Reuse the helpers in `fake-thread-commands.ts`, and move a helper there once a second test file needs it.
 - Assert on `ui.find` results: a missed match is `undefined`, not a failure.
 

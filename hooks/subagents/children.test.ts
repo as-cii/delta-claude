@@ -15,14 +15,14 @@ describe('subagents', () => {
     await mainTurn($, 'main')
     const agentId = await spawn($)
     await $.session.append(childPrompt(agentId))
-    await fake.clock.settle()
+    await fake.settle()
     // Its first turn says whose checkout it works in, so its thread waits for that turn.
     expect(fake.server.subagents.has(agentId)).toBe(false)
     await $.turn.start({ ...turnStart('child-turn', 'Inspect the parser'), agentId } as never)
     await $.session.append({ agentId, door: 'response', uuid: 'child-answer', message: {
       type: 'assistant', role: 'assistant', content: [{ type: 'text', text: 'Parser looks fine' }] } } as never)
     await $.turn.complete({ ...turnComplete('child-turn'), agentId } as never)
-    await fake.clock.settle()
+    await fake.settle()
 
     // Working in the session's checkout, its thread shares the session's worktree.
     expect(fake.server.subagents.get(agentId)).toMatchObject({
@@ -46,14 +46,14 @@ describe('subagents', () => {
     let release!: () => void
     fake.holdSpawn = new Promise<void>((resolve) => { release = resolve })
     const spawned = $.agent.spawn(spawnInput() as never)
-    await fake.clock.settle()
+    await fake.settle()
     // The host names the agent only after its first turn already started.
     await $.turn.start({ ...turnStart('early-turn', 'Inspect the parser'), agentId: 'agent1' } as never)
     await $.session.append(childPrompt('agent1'))
     release()
     await spawned
     await $.turn.complete({ ...turnComplete('early-turn'), agentId: 'agent1' } as never)
-    await fake.clock.settle()
+    await fake.settle()
     expect(fake.childRecords('agent1').map((record) => record.update?.sessionUpdate))
       .toEqual(['state_update', 'user_message', 'state_update'])
     fake.expectClean()
@@ -66,14 +66,14 @@ describe('subagents', () => {
     const held = new Promise<void>((resolve) => { release = resolve })
     fake.holdStoreGet = (key) => key.startsWith('child:') ? held : undefined
     const spawned = $.agent.spawn(spawnInput() as never)
-    await fake.clock.settle()
+    await fake.settle()
     await $.session.append(childPrompt('agent1'))
     fake.holdStoreGet = undefined
     release()
     await spawned
     await $.turn.start({ ...turnStart('late-turn', 'Inspect the parser'), agentId: 'agent1' } as never)
     await $.turn.complete({ ...turnComplete('late-turn'), agentId: 'agent1' } as never)
-    await fake.clock.settle()
+    await fake.settle()
     expect(fake.childRecords('agent1').map((record) => record.update?.sessionUpdate))
       .toEqual(['state_update', 'user_message', 'state_update'])
     fake.expectClean()
@@ -87,7 +87,7 @@ describe('subagents', () => {
     await mainTurn($, 'main')
     const agentId = await spawn($)
     await childRun($, agentId, 'child-turn', 'Parser looks fine')
-    await fake.clock.settle()
+    await fake.settle()
     expect(fake.server.subagents.size).toBe(0)
     fake.expectClean()
   })
@@ -99,7 +99,7 @@ describe('subagents', () => {
     const teammate = await spawn($, { isTeammate: true })
     const grandchild = await spawn($, { parentAgentId: teammate })
     for (const agentId of [fork, teammate, grandchild]) await childRun($, agentId, `${agentId}-turn`, 'done')
-    await fake.clock.settle()
+    await fake.settle()
     expect(fake.server.subagents.size).toBe(0)
     expect(fake.operations().filter((operation) => operation === 'create')).toHaveLength(1)
     fake.expectClean()
@@ -118,7 +118,7 @@ describe('subagents', () => {
     expect(child.sharedWorktrees).toBe(false)
     expect(child.detached?.directory).toBe(worktree)
     expect(child.checkout).toBeUndefined()
-    await fake.clock.settle()
+    await fake.settle()
     // The session's own checkout stays attached to the session's thread.
     expect(fake.server.mount?.directory).toBe(CHECKOUT)
     fake.expectClean()
@@ -131,7 +131,7 @@ describe('subagents', () => {
     let release!: () => void
     fake.holdSpawn = new Promise<void>((resolve) => { release = resolve })
     const spawning = $.agent.spawn(spawnInput({ description: 'Fix the lexer' }) as never) as Promise<{ agentId: string }>
-    await fake.clock.settle()
+    await fake.settle()
     const created = await $.classic.WorktreeCreate({
       session_id: fake.session, cwd: CHECKOUT, hook_event_name: 'WorktreeCreate', name: 'agent-agent1',
     } as never) as { worktreePath?: string }
@@ -145,13 +145,13 @@ describe('subagents', () => {
     fake.cwd = created.worktreePath!
     await childRun($, agentId, 'forked-turn', 'Fixed the lexer')
     fake.cwd = CHECKOUT
-    await fake.clock.settle()
+    await fake.settle()
     expect(fake.childRecords(agentId).map((record) => record.update?.state ?? record.update?.content?.[0]?.text))
       .toEqual(['running', 'Inspect the parser', 'Fixed the lexer', 'idle'])
     expect(child.checkout ?? child.detached).toBeUndefined()
     // Its fork has no git branch here, so the parent is told how to merge it.
     await $.turn.complete(turnComplete('main'))
-    await fake.clock.settle()
+    await fake.settle()
     expect(notes(fake).at(-1)).toContain(`thread merge ${child.reference} --into ${fake.threadId}`)
 
     // Claude removing the worktree releases Delta's checkout; the fork stays in the thread.
@@ -172,7 +172,7 @@ describe('subagents', () => {
     await $.turn.start({ ...turnStart('parent-turn', 'Inspect the parser'), agentId: parent } as never)
     const nested = await spawn($, { parentAgentId: parent, description: 'Check the lexer' })
     await childRun($, nested, 'nested-turn', 'Lexer is fine')
-    await fake.clock.settle()
+    await fake.settle()
     const parentThread = fake.server.subagents.get(parent)!
     expect(parentThread).toMatchObject({ sharedWorktrees: false, checkout: { directory: worktree } })
     // The nested child works in its parent's worktree, so it attaches no checkout of its own.
@@ -182,7 +182,7 @@ describe('subagents', () => {
     expect(fake.childRecords(nested)[1]!.update?._meta?.delta?.sender).toEqual({ external_id: parent })
     await $.turn.complete({ ...turnComplete('parent-turn'), agentId: parent } as never)
     fake.cwd = CHECKOUT
-    await fake.clock.settle()
+    await fake.settle()
     fake.expectClean()
   })
 
@@ -194,7 +194,7 @@ describe('subagents', () => {
       fake.fenceChildTurns.add(1)
       await $.turn.start({ ...turnStart('fenced-turn', 'Inspect the parser'), agentId } as never)
       await $.session.append(childPrompt(agentId))
-      await fake.clock.settle()
+      await fake.settle()
       if (foreground) {
         expect(fake.aborts).toEqual(['main'])
         expect(fake.taskStops).toEqual([])
@@ -212,11 +212,11 @@ describe('subagents', () => {
     fake.childAppendOffline = true
     const agentId = await spawn($)
     await childRun($, agentId, 'offline-turn', 'Queued answer')
-    await fake.clock.settle()
+    await fake.settle()
     expect(fake.childRecords(agentId)).toEqual([])
     fake.childAppendOffline = false
-    await fake.clock.advance(60_000)
-    await fake.clock.settle()
+    await fake.advance(60_000)
+    await fake.settle()
     expect(fake.childRecords(agentId)).toHaveLength(4)
     fake.expectClean()
   })
@@ -250,7 +250,7 @@ describe('subagents', () => {
     fake.agentMessages.set('running', [userText('Run the tests'), answer('Tests pass')])
     fake.agentMessages.set('vanished', [userText('Check the lexer'), answer('Lexer is fine')])
     await fake.share($)
-    await fake.clock.settle()
+    await fake.settle()
     expect([...fake.server.subagents.keys()].sort()).toEqual(['earlier', 'isolated', 'kept', 'running', 'vanished'])
     expect(Object.fromEntries([...fake.server.subagents].map(([id, child]) => [id, child.sharedWorktrees]))).toEqual({
       earlier: true, isolated: false, kept: false, running: true, vanished: true,
@@ -272,7 +272,7 @@ describe('subagents', () => {
     await $.session.append({ agentId: 'running', door: 'response', uuid: 'live', message: {
       type: 'assistant', role: 'assistant', content: [{ type: 'text', text: 'Tests pass' }] } } as never)
     await $.turn.complete({ ...turnComplete('running-turn'), agentId: 'running' } as never)
-    await fake.clock.settle()
+    await fake.settle()
     expect(turn('running')).toEqual([['running', 1], ['Run the tests', 1], ['Tests pass', 1], ['idle', 1]])
     fake.expectClean()
   })
@@ -286,7 +286,7 @@ describe('subagents', () => {
     ]
     fake.unreadableAgents.add('outer')
     await fake.share($)
-    await fake.clock.settle()
+    await fake.settle()
     expect(fake.server.subagents.get('nested')?.sharedWorktrees).toBe(true)
     fake.expectClean()
   })
@@ -302,12 +302,12 @@ describe('subagents', () => {
     }] }]
     fake.agentMessages.set('apart', [userText('Fix the lexer'), answer('Lexer fixed')])
     await fake.share($)
-    await fake.clock.settle()
+    await fake.settle()
     expect(fake.server.subagents.get('apart')?.sharedWorktrees).toBe(false)
 
     // Someone takes it over in Delta: its running turn is superseded, and Claude stops it.
     fake.supersedeChild('apart')
-    await fake.clock.settle()
+    await fake.settle()
     expect(fake.taskStops).toEqual(['apart'])
 
     // Its run ends in its isolated worktree, which is attached before the run's detach.
@@ -315,7 +315,7 @@ describe('subagents', () => {
     fake.cwd = worktree
     await $.turn.complete({ ...turnComplete('apart-turn'), agentId: 'apart' } as never)
     fake.cwd = CHECKOUT
-    await fake.clock.settle()
+    await fake.settle()
     expect(fake.server.subagents.get('apart')?.detached?.directory).toBe(worktree)
     fake.expectClean()
   })
@@ -326,11 +326,11 @@ describe('subagents', () => {
     fake.childAppendOffline = true
     const agentId = await spawn($)
     await $.turn.start({ ...turnStart('interrupted', 'Inspect the parser'), agentId } as never)
-    await fake.clock.settle()
+    await fake.settle()
     await $.session.end({ reason: 'other', sessionId: fake.session, resume: { id: fake.session } } as never)
     fake.childAppendOffline = false
     await $.session.start(sessionStart)
-    await fake.clock.settle()
+    await fake.settle()
     expect(fake.childRecords(agentId).map((record) => [record.update?.state, record.update?.stopReason]))
       .toEqual([['running', undefined], ['idle', 'cancelled']])
     fake.expectClean()
@@ -349,7 +349,7 @@ describe('Delta threads as subagents', () => {
       items: [remoteItem('We should ship release notes', { id: 'ask' })],
     })
     fake.child({ thread_id: 'notes-thread', reference: 'root#s=notes', kind: 'subthread', name: 'Release notes', status: 'inactive' })
-    await fake.clock.settle()
+    await fake.settle()
     expect(notes(fake).join('\n')).toContain('"Release notes" (inactive)')
 
     const creates = fake.operations().filter((operation) => operation === 'create').length
@@ -357,7 +357,7 @@ describe('Delta threads as subagents', () => {
     let release!: () => void
     fake.holdSpawn = new Promise<void>((resolve) => { release = resolve })
     const sending = $.session.send({ to: 'Release notes', text: 'Write RELEASE.md' } as never)
-    await fake.clock.settle()
+    await fake.settle()
     await $.turn.start({ ...turnStart('notes-turn'), agentId: 'agent1' } as never)
     await $.session.append({ agentId: 'agent1', door: 'prompt', uuid: 'adopted-prompt', message: {
       type: 'user', role: 'user', content: [{ type: 'text', text: 'the history, then Write RELEASE.md' }] } } as never)
@@ -374,7 +374,7 @@ describe('Delta threads as subagents', () => {
       type: 'assistant', role: 'assistant', content: [{ type: 'text', text: 'Wrote RELEASE.md' }] } } as never)
     fake.agentSummaries.set(run!.agentId, [{ role: 'assistant', text: 'Wrote RELEASE.md', toolUses: [] }])
     await $.turn.complete({ ...turnComplete('notes-turn'), agentId: run!.agentId } as never)
-    await fake.clock.settle()
+    await fake.settle()
 
     // Its turn is recorded on the existing thread, prompted with the message alone; no thread was created.
     const recorded = fake.server.subagents.get(run!.agentId)!
@@ -391,7 +391,7 @@ describe('Delta threads as subagents', () => {
   test('each session is told which threads it can message, even when an earlier session in the process was told the same', async ($, on) => {
     const fake = await sharedSession($, on)
     fake.child({ thread_id: 'notes-thread', reference: 'root#s=notes', kind: 'subthread', name: 'Release notes', status: 'inactive' })
-    await fake.clock.settle()
+    await fake.settle()
     expect(notes(fake).filter((note) => note.includes('"Release notes"'))).toHaveLength(1)
 
     // Another session in this process records the same conversation and is told again.
@@ -402,12 +402,12 @@ describe('Delta threads as subagents', () => {
     fake.producer = first
     fake.store.set(`session:${fake.session}`, { ...binding, session: fake.session, producer: first })
     await $.session.start(sessionStart)
-    await fake.clock.settle()
+    await fake.settle()
     // The second session watches the thread once a prompt needs it.
     expect((await $.prompt.submit(prompt('continue'))).drop).toBeUndefined()
-    await fake.clock.settle()
+    await fake.settle()
     fake.child({ thread_id: 'notes-thread', reference: 'root#s=notes', kind: 'subthread', name: 'Release notes', status: 'inactive' })
-    await fake.clock.settle()
+    await fake.settle()
     expect(notes(fake).filter((note) => note.includes('"Release notes"'))).toHaveLength(2)
   })
 
@@ -422,7 +422,7 @@ describe('Delta threads as subagents', () => {
       items: [remoteItem('We should ship release notes', { id: 'ask' })],
     })
     fake.child({ thread_id: 'notes-thread', reference: 'root#s=notes', kind: 'subthread', name: 'Release notes', status: 'inactive' })
-    await fake.clock.settle()
+    await fake.settle()
     fake.spawnStartsNone = true
     const sent = await $.session.send({ to: 'Release notes', text: 'Write RELEASE.md' } as never)
     expect(sent).toEqual({ isDelivered: false, reason: 'Claude started no subagent to run the Delta thread "Release notes".' })
@@ -439,7 +439,7 @@ describe('Delta threads as subagents', () => {
       items: [remoteItem('We should ship release notes', { id: 'ask' })], runningBy: 'Antonio',
     })
     fake.child({ thread_id: 'notes-thread', reference: 'root#s=notes', kind: 'subthread', name: 'Release notes', status: 'running' })
-    await fake.clock.settle()
+    await fake.settle()
     const send = () => $.session.send({ to: 'Release notes', text: 'Write RELEASE.md' } as never)
 
     // A session no one can answer leaves the thread alone without asking.
@@ -467,7 +467,7 @@ describe('Delta threads as subagents', () => {
     await mainTurn($, 'main')
     const agentId = await spawn($)
     await childRun($, agentId, 'first-turn', 'Parser looks fine')
-    await fake.clock.settle()
+    await fake.settle()
     const child = fake.server.subagents.get(agentId)!
     fake.server.threads.set(child.reference, {
       thread: child.thread, name: child.name, worktrees: [],
@@ -478,7 +478,7 @@ describe('Delta threads as subagents', () => {
       ],
     })
     fake.child({ thread_id: child.thread, reference: child.reference, kind: 'subthread', name: child.name, status: 'inactive' })
-    await fake.clock.settle()
+    await fake.settle()
 
     expect(await $.session.send({ to: 'Inspect the parser', text: 'Summarize both' } as never)).toEqual({ isDelivered: true })
     // Claude's own delivery resumes it, readdressed to the agent and told what it missed.
@@ -489,7 +489,7 @@ describe('Delta threads as subagents', () => {
     await $.agent.spawn(spawnInput({ resume: { agentId }, prompt: sent!.text }) as never)
     await $.turn.start({ ...turnStart('second-turn'), agentId } as never)
     await $.turn.complete({ ...turnComplete('second-turn'), agentId } as never)
-    await fake.clock.settle()
+    await fake.settle()
     const prompts = fake.childRecords(agentId).filter((record) => record.update?.sessionUpdate === 'user_message')
     expect(prompts.map((record) => [record.update?.content?.[0]?.text, record.turnSequence]))
       .toEqual([['Inspect the parser', 1], ['Summarize both', 5]])
@@ -500,7 +500,7 @@ describe('Delta threads as subagents', () => {
       remoteItem('Both are fine', { id: 'own-2', kind: 'agent_message', turn_id: '3', author: { user_id: null, name: 'Claude Code', actor_id: childActor(agentId) } }))
     fake.child({ thread_id: child.thread, reference: child.reference, kind: 'subthread', name: child.name, status: 'running' })
     fake.child({ thread_id: child.thread, reference: child.reference, kind: 'subthread', name: child.name, status: 'inactive' })
-    await fake.clock.settle()
+    await fake.settle()
     expect(reports()).toEqual([])
     fake.expectClean()
   })
@@ -523,7 +523,7 @@ describe('Delta threads as subagents', () => {
     // Claude ends the stopped run; its watch closes with the turn, and it is stopped only once.
     await $.turn.complete({ ...turnComplete('long-tool'), agentId, isAborted: true } as never)
     await $.turn.complete(turnComplete('main'))
-    await fake.clock.settle()
+    await fake.settle()
     expect(fake.childWatches.get(agentId)?.closed).toBe(true)
     expect(fake.taskStops).toEqual([agentId])
 
@@ -535,7 +535,7 @@ describe('Delta threads as subagents', () => {
     status('running')
     items.push(remoteItem('The parser is fine', { id: 'reply', kind: 'agent_message', turn_id: 'delta-1', author: { user_id: null, name: 'Delta agent' } }))
     status('inactive')
-    await fake.clock.settle()
+    await fake.settle()
     // The parent waited on that turn, so its reply starts a turn of the parent's own.
     expect(fake.entered.at(-1)?.text).toContain('Delta agent ran a turn in the thread "Inspect the parser" in Delta')
     expect(fake.entered.at(-1)?.text).toContain('The parser is fine')
@@ -545,7 +545,7 @@ describe('Delta threads as subagents', () => {
     items.push(remoteItem('Check the lexer too', { id: 'ask-2' }))
     items.push(remoteItem('The lexer is fine', { id: 'reply-2', kind: 'agent_message', turn_id: 'delta-2', author: { user_id: null, name: 'Delta agent' } }))
     status('inactive')
-    await fake.clock.settle()
+    await fake.settle()
     // Nobody waits on this one: it is context for the parent's next turn, reported from where the last report ended.
     expect(fake.entered).toHaveLength(entered)
     const report = notes(fake).at(-1)!
